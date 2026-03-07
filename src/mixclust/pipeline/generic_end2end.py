@@ -135,6 +135,7 @@ def run_generic_end2end(
         "best_K": info.get("final_C"),
         "final_algo": info.get("final_algo"),
         "used_metric": info.get("used_metric"),
+        "structural_control": info.get("structural_control"),   # ← NEW patch 6 Maret 2026
         "timing_s": info.get("timing_s", {}),
     }
     with open(os.path.join(outdir, "metrics_internal.json"), "w", encoding="utf-8") as f:
@@ -149,9 +150,3 @@ def run_generic_end2end(
         "metrics_path": os.path.join(outdir, "metrics_internal.json"),
         "runtime_s": round(time.time() - t0, 2),
     }
-
-if __name__ == "__main__":
-    # contoh pakai CSV umum (opsional)
-    # df = pd.read_csv("data/any_dataset.csv")
-    # out = run_generic_end2end(df, outdir="runs/demo-generic", id_col="HHID")
-    pass
