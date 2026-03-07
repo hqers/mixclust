@@ -8,6 +8,17 @@ from time import perf_counter
 from mixclust.prototypes import build_prototypes_by_cluster_gower
 from mixclust.metrics.lsil import lsil_using_prototypes_gower
 from mixclust.silhouette import full_silhouette_gower_subsample
+from mixclust.landmarks import (
+    subsample_and_propagate_labels,
+    select_landmarks_cluster_aware,
+    cluster_aware_landmarks_on_subsample
+)
+from mixclust.features import build_features
+from mixclust.aufs_samba.preprocess import prepare_mixed_arrays_no_label
+
+# FIX: import full_silhouette_gower di level modul (bukan di dalam cabang if)
+from mixclust.silhouette import full_silhouette_gower
+
 
 try:
     from mixclust.aufs_samba.redundancy import redundancy_penalty
@@ -17,44 +28,7 @@ except Exception:
 
 
 # ---- helper: siapkan komponen Gower (fallback jika modul preprocess tidak tersedia) ----
-try:
-    # kalau kamu sudah punya fungsi ini di modul preprocess, pakai saja
-    from mixclust.preprocess import prepare_mixed_arrays_no_label  # prefer di root
-except Exception:
-    try:
-        from .preprocess import prepare_mixed_arrays_no_label       # atau di submodul aufs_samba
-    except Exception:
-        # fallback minimal agar file ini tetap mandiri
-        def prepare_mixed_arrays_no_label(df: pd.DataFrame):
-            df2 = df.copy()
-            cat_cols = df2.select_dtypes(include=['object','category','bool']).columns.tolist()
-            num_cols = df2.select_dtypes(include=[np.number]).columns.tolist()
 
-            if len(num_cols) > 0:
-                X_num = df2[num_cols].values.astype(np.float32)
-                vmin = X_num.min(axis=0).astype(np.float32)
-                vmax = X_num.max(axis=0).astype(np.float32)
-                inv  = (1.0 / np.maximum(vmax - vmin, 1e-9)).astype(np.float32)
-                mnum = np.ones(X_num.shape[1], dtype=bool)
-            else:
-                X_num = np.zeros((len(df2), 0), dtype=np.float32)
-                vmin = np.zeros((0,), dtype=np.float32)
-                vmax = np.ones((0,), dtype=np.float32)
-                inv  = np.ones((0,), dtype=np.float32)
-                mnum = None
-
-            if len(cat_cols) > 0:
-                X_cat_list = []
-                for c in cat_cols:
-                    vals, _ = pd.factorize(df2[c].astype(str), sort=True)
-                    X_cat_list.append(vals.astype(np.int32))
-                X_cat = np.vstack(X_cat_list).T
-                mcat  = np.ones(X_cat.shape[1], dtype=bool)
-            else:
-                X_cat = np.zeros((len(df2), 0), dtype=np.int32)
-                mcat  = None
-
-            return X_num, X_cat, vmin, vmax, mnum, mcat, inv
         
 def _stratified_landmarks(y: np.ndarray, m_target: int, per_cluster_min: int, rng: np.random.Generator) -> np.ndarray:
     n = len(y)
@@ -74,7 +48,7 @@ def _stratified_landmarks(y: np.ndarray, m_target: int, per_cluster_min: int, rn
     # rapikan ukuran pas:
     if len(L) > m_target: L = L[:m_target]
     return np.array(sorted(L), dtype=int)
-
+    
 # ---- fungsi utama: pembuat reward untuk SA ----
 def make_sa_reward(
     df_full,
@@ -94,8 +68,11 @@ def make_sa_reward(
     dynamic_k: bool = False 
 ):
     if metric == "silhouette_gower":
-        from mixclust.silhouette import full_silhouette_gower
-        from mixclust.aufs_samba.preprocess import prepare_mixed_arrays_no_label
+        # FIX: hapus re-import lokal di sini — sudah diimport di level modul atas
+        # (re-import lokal menyebabkan Python menganggap prepare_mixed_arrays_no_label
+        #  sebagai local variable di seluruh fungsi make_sa_reward, sehingga
+        #  cabang lain (lsil_fixed_calibrated dll) yang memanggilnya sebelum
+        #  blok ini dieksekusi akan raise UnboundLocalError)
 
         def reward(cols: List[str]) -> float:
             if not cols:
@@ -140,11 +117,8 @@ def make_sa_reward(
 
 
     elif metric == "lsil":
-        from mixclust.features import build_features, prepare_mixed_arrays
-        from mixclust.landmarks import select_landmarks_cluster_aware
-        from mixclust.metrics.lsil import lsil_using_prototypes_gower
-        from mixclust.prototypes import build_prototypes_by_cluster_gower
-        from mixclust.aufs_samba.preprocess import prepare_mixed_arrays_no_label
+        # FIX: hapus semua re-import lokal di sini — sudah diimport di level modul atas
+        from mixclust.features import build_features, prepare_mixed_arrays  # prepare_mixed_arrays mungkin belum diimport di atas
 
         # --- di make_sa_reward (metric == "lsil") ---
         # (1) Siapkan LANDMARK sekali dari representasi full (hemat biaya)
@@ -202,11 +176,7 @@ def make_sa_reward(
 
     # di make_sa_reward(...):
     elif metric == "lsil_fixed":
-        from mixclust.features import build_features
-        from mixclust.landmarks import select_landmarks_cluster_aware
-        from mixclust.metrics.lsil import lsil_using_prototypes_gower
-        from mixclust.prototypes import build_prototypes_by_cluster_gower
-        from mixclust.aufs_samba.preprocess import prepare_mixed_arrays_no_label
+        # FIX: hapus re-import lokal di sini — sudah diimport di level modul atas
     
         # 0) PRECOMPUTE sekali untuk FULL DF  ------------------------------------
         # 0a) arrays Gower utk FULL DF
@@ -224,25 +194,61 @@ def make_sa_reward(
     
         # 0c) label awal (sekali) di FULL DF
         cat_idx_full = [df_full.columns.get_loc(c) for c in cat_cols_full]
-        labels0 = cluster_fn(df_full, cat_idx_full, n_clusters, random_state)
-    
+        #labels0 = cluster_fn(df_full, cat_idx_full, n_clusters, random_state)
+        # (baru) subsample + propagate + cluster-aware landmarks on subsample
+        cat_cols_full = df_full.select_dtypes(include=['object','category','bool']).columns.tolist()
+        # --- Defaults untuk subsample / kalibrasi (bisa dipindahkan nanti ke AUFSParams) ---
+        # reward_subsample_n: jumlah baris untuk subsample awal (cap). kalau kecil dataset pakai n.
+        reward_subsample_n = min(len(df_full), 20000)
+        
+        # lsil_m_cap: upper cap untuk jumlah landmark (m)
+        lsil_m_cap = 300
+        
+        # Kalibrasi: frekuensi/strategi default
+        guard_every = 50           # hitung SS subsample tiap 50 panggilan (kalibrasi opsional)
+        ss_max_n_cal = 400         # ukuran subsample SS saat kalibrasi
+        calibrate_mode = "topk"    # "always" | "on_demand" | "topk"
+        calibrate_after_iter = 10  # mulai kalibrasi setelah iterasi ini (untuk on_demand)
+        
+        # caching dan kontrol
+        use_cache = True           # cache koef A,B per-subset bila kalibrasi dipakai
+
+        labels0, protos0, idx_sub, labels_sub = subsample_and_propagate_labels(
+            df_full=df_full,
+            cat_cols_full=cat_cols_full,
+            cluster_fn=cluster_fn,
+            n_clusters=n_clusters,
+            random_state=random_state,
+            subsample_n=reward_subsample_n,         # pass from params or hardcode 20000
+            proto_sample_cap=lsil_proto_sample_cap,
+            per_cluster_proto=per_cluster_proto_if_many
+        )
+        
+        m = min(int(0.1 * len(df_full)), lsil_m_cap)   # lsil_m_cap from params
+        L_fixed = cluster_aware_landmarks_on_subsample(
+            df_full=df_full,
+            idx_sub=idx_sub,
+            labels_sub=labels_sub,
+            labels_full=labels0,
+            m_cap=m,
+            per_cluster_min=3,
+            random_state=random_state,
+            select_landmarks_fn=select_landmarks_cluster_aware if 'select_landmarks_cluster_aware' in globals() else None
+        )
+
+
+        
         # 0d) X_unit utk landmark & landmark cluster-aware (sekali)
         X_unit_full, _, _ = build_features(
             df_full, label_col=None, scaler_type="standard", unit_norm=True
         )
-        m = min(int(0.1 * len(df_full)), 300)
-        L_fixed = select_landmarks_cluster_aware(
-            X_unit_full, labels0, m,
-            central_frac=0.8, boundary_frac=0.2,
-            per_cluster_min=3, seed=random_state
-        )
     
         # 0e) Prototipe (sekali) di FULL DF
-        protos0 = build_prototypes_by_cluster_gower(
-            labels0, X_num_full, X_cat_full, num_min_full, num_max_full,
-            per_cluster=per_cluster_proto_if_many, sample_cap=lsil_proto_sample_cap,
-            seed=random_state, feature_mask_num=None, feature_mask_cat=None, inv_rng=inv_rng_full
-        )
+       # protos0 = build_prototypes_by_cluster_gower(
+       #     labels0, X_num_full, X_cat_full, num_min_full, num_max_full,
+        #    per_cluster=per_cluster_proto_if_many, sample_cap=lsil_proto_sample_cap,
+       #    seed=random_state, feature_mask_num=None, feature_mask_cat=None, inv_rng=inv_rng_full
+       # )
     
         # util: buat mask fitur utk subset kolom (sangat cepat)
         def make_masks_for_subset(cols):
@@ -288,115 +294,146 @@ def make_sa_reward(
     
         return reward
 
-    # src/mixclust/aufs_samba/reward.py (tambahkan cabang baru)
     elif metric == "lsil_fixed_calibrated":
-        from mixclust.features import build_features
-        from mixclust.landmarks import select_landmarks_cluster_aware
-        from mixclust.metrics.lsil import lsil_using_prototypes_gower
-        from mixclust.prototypes import build_prototypes_by_cluster_gower
-        from mixclust.silhouette import full_silhouette_gower_subsample
-        from mixclust.aufs_samba.preprocess import prepare_mixed_arrays_no_label
-        #from mixclust.metrics.lsil import lsil_using_prototypes_gower as _lsil_using_proto
-        #import numpy as np
-    
-        # --- PRECOMPUTE sekali (sama dgn lsil_fixed) ---
+        guard_every = 50
+        ss_max_n_cal = 400
+        reward_subsample_n = 20000
+        calibrate_mode = "topk"
+        calibrate_after_iter = 10
+        use_cache = True
+
+        # --- PRECOMPUTE once (cheap) using subsample & propagate ---
+        # FIX: hapus re-import lokal di sini — sudah diimport di level modul atas
         X_num_full, X_cat_full, num_min_full, num_max_full, _, _, inv_rng_full = \
             prepare_mixed_arrays_no_label(df_full)
-    
+
         num_cols_full = df_full.select_dtypes(include=[np.number]).columns.tolist()
         cat_cols_full = df_full.select_dtypes(include=['object','category','bool']).columns.tolist()
         num_pos = {c: i for i, c in enumerate(num_cols_full)}
         cat_pos = {c: i for i, c in enumerate(cat_cols_full)}
-    
-        cat_idx_full = [df_full.columns.get_loc(c) for c in cat_cols_full]
-        labels0 = cluster_fn(df_full, cat_idx_full, n_clusters, random_state)
-    
-        X_unit_full, _, _ = build_features(df_full, label_col=None, scaler_type="standard", unit_norm=True)
-        m = min(int(0.1 * len(df_full)), 300)
-        L_fixed = select_landmarks_cluster_aware(
-            X_unit_full, labels0, m, central_frac=0.8, boundary_frac=0.2,
-            per_cluster_min=3, seed=random_state
+
+        # use subsample_and_propagate_labels to get initial labels0 and protos0 cheaply
+        labels0, protos0, idx_sub, labels_sub = subsample_and_propagate_labels(
+            df_full=df_full,
+            cat_cols_full=cat_cols_full,
+            cluster_fn=cluster_fn,
+            n_clusters=n_clusters,
+            random_state=random_state,
+            subsample_n=reward_subsample_n,
+            proto_sample_cap=lsil_proto_sample_cap,
+            per_cluster_proto=per_cluster_proto_if_many
         )
-    
-        protos0 = build_prototypes_by_cluster_gower(
-            labels0, X_num_full, X_cat_full, num_min_full, num_max_full,
-            per_cluster=per_cluster_proto_if_many, sample_cap=lsil_proto_sample_cap,
-            seed=random_state, feature_mask_num=None, feature_mask_cat=None, inv_rng=inv_rng_full
+
+        lsil_m_cap = 300
+        m = min(int(0.1 * len(df_full)), lsil_m_cap)
+        L_fixed = cluster_aware_landmarks_on_subsample(
+            df_full=df_full,
+            idx_sub=idx_sub,
+            labels_sub=labels_sub,
+            labels_full=labels0,
+            m_cap=m,
+            per_cluster_min=3,
+            random_state=random_state,
+            select_landmarks_fn=select_landmarks_cluster_aware if 'select_landmarks_cluster_aware' in globals() else None
         )
-    
+
+        # protos0 already built by subsample_and_propagate_labels (if implemented). Fallback:
+        if protos0 is None:
+            protos0 = build_prototypes_by_cluster_gower(
+                labels0, X_num_full, X_cat_full, num_min_full, num_max_full,
+                per_cluster=per_cluster_proto_if_many, sample_cap=lsil_proto_sample_cap,
+                seed=random_state, feature_mask_num=None, feature_mask_cat=None, inv_rng=inv_rng_full
+            )
+
+        # masks util (vectorized)
         def make_masks_for_subset(cols):
             mnum = np.zeros(X_num_full.shape[1], dtype=bool) if X_num_full.shape[1] else None
             mcat = np.zeros(X_cat_full.shape[1], dtype=bool) if X_cat_full.shape[1] else None
-            for c in cols:
-                if mnum is not None and c in num_pos: mnum[num_pos[c]] = True
-                if mcat is not None and c in cat_pos: mcat[cat_pos[c]] = True
+            if mnum is not None:
+                idxs = [num_pos[c] for c in cols if c in num_pos]
+                if idxs: mnum[np.array(idxs)] = True
+            if mcat is not None:
+                idxs = [cat_pos[c] for c in cols if c in cat_pos]
+                if idxs: mcat[np.array(idxs)] = True
             return mnum, mcat
-    
-        # --- Kalibrasi linear S ≈ aL + b ---
-        A, B = 1.0, 0.0   # koefisien awal (identitas)
-        lsil_hist, ss_hist = [], []
+
+        # calibration cache: key -> (A,B, last_updated_iter)
+        _calib_cache = {}
+        lsil_hist_global = []
+        ss_hist_global = []
         call_count = 0
-        guard_every = 10      # hitung SS(subsample) tiap 15 panggilan
-        ss_max_n_cal = 400    # subsample kecil biar cepat
-    
+
         def reward(cols):
-            nonlocal A, B, call_count, lsil_hist, ss_hist
-            if not cols: return -1.0
+            nonlocal call_count, _calib_cache, lsil_hist_global, ss_hist_global
+
+            if not cols:
+                return -1.0
+
+            call_count += 1
             mask_num, mask_cat = make_masks_for_subset(cols)
-    
-            # 1) L-Sil (fixed)
-            
-            if lsil_agg_mode=="topk" and int(lsil_topk)==1:
-                L = _lsil_fast(labels0, L_fixed, protos0,
-                               X_num_full, X_cat_full, num_min_full, num_max_full,
-                               feature_mask_num=mask_num, feature_mask_cat=mask_cat, inv_rng=inv_rng_full)
-            else:
+
+            # 1) Fast L-Sil (fixed) evaluation using precomputed labels0/protos0 & masked features
+            try:
                 L = lsil_using_prototypes_gower(
                     labels0, L_fixed, protos0,
                     X_num_full, X_cat_full, num_min_full, num_max_full,
                     feature_mask_num=mask_num, feature_mask_cat=mask_cat,
                     inv_rng=inv_rng_full, agg_mode=lsil_agg_mode, topk=lsil_topk
                 )
-    
-            call_count += 1
-            # 2) Sesekali ambil titik kalibrasi: SS Gower subsample atas KLASTER TERBARU (recluster)
-            if (call_count % guard_every) == 0:
+            except Exception as e:
+                return -1.0
+
+            if (calibrate_mode == "always" and (call_count % guard_every) == 0) or (calibrate_mode == "on_demand" and call_count > calibrate_after_iter and (call_count % guard_every) == 0):
+                do_calib = True
+            elif calibrate_mode == "topk":
+                do_calib = False
+            else:
+                do_calib = False
+
+            key = tuple(sorted(cols))
+            if use_cache and key in _calib_cache:
+                A, B = _calib_cache[key]
+                score = A * float(L) + B
+            elif do_calib:
                 try:
-                    # re-cluster dgn subset (biar SS representatif), ringan saja:
                     sub_df = df_full[cols]
-                    cat_idx_sub = [sub_df.columns.get_loc(c) for c in sub_df.columns if c in cat_cols]
-                    labels_sub = cluster_fn(sub_df, cat_idx_sub, n_clusters, random_state)
-    
-                    Xn, Xc, nmin, nmax, mnum_sub, mcat_sub, inv_sub = prepare_mixed_arrays_no_label(sub_df)
+                    cat_idx_sub = [sub_df.columns.get_loc(c) for c in sub_df.columns if c in cat_cols_full]
+                    labels_sub_new = cluster_fn(sub_df, cat_idx_sub, n_clusters, random_state)
+
+                    Xn_sub, Xc_sub, nmin_sub, nmax_sub, mnum_sub, mcat_sub, inv_sub = prepare_mixed_arrays_no_label(sub_df)
                     S, _, _ = full_silhouette_gower_subsample(
-                        Xn, Xc, nmin, nmax, labels_sub, max_n=ss_max_n_cal,
+                        Xn_sub, Xc_sub, nmin_sub, nmax_sub, labels_sub_new, max_n=ss_max_n_cal,
                         feature_mask_num=mnum_sub, feature_mask_cat=mcat_sub, inv_rng=inv_sub
                     )
-                    lsil_hist.append(float(L)); ss_hist.append(float(S))
-    
-                    # jika sudah ≥5 titik → fit linear least squares
-                    if len(lsil_hist) >= 5:
-                        X = np.vstack([np.array(lsil_hist), np.ones(len(lsil_hist))]).T
-                        A_, B_ = np.linalg.lstsq(X, np.array(ss_hist), rcond=None)[0]
+                    lsil_hist_global.append(float(L)); ss_hist_global.append(float(S))
+                    if len(lsil_hist_global) >= 5:
+                        X = np.vstack([np.array(lsil_hist_global), np.ones(len(lsil_hist_global))]).T
+                        A_, B_ = np.linalg.lstsq(X, np.array(ss_hist_global), rcond=None)[0]
                         A, B = float(A_), float(B_)
-                        if 'verbose' in dir(np) or True:
-                            print(f"[CAL] update A={A:.3f}, B={B:.3f}, n={len(lsil_hist)}")
-                except Exception as e:
-                    # aman-aman saja kalau kalibrasi gagal; biarkan A,B lama
-                    pass
-    
-            # 3) kembalikan nilai TERKALIBRASI agar lebih “sejalan” dg SS
-            score = A * float(L) + B
-    
+                        if use_cache:
+                            _calib_cache[key] = (A, B)
+                    else:
+                        A, B = 1.0, 0.0
+                    score = A * float(L) + B
+                except Exception:
+                    score = float(L)
+            else:
+                score = float(L)
+
             if use_redundancy_penalty and redundancy_matrix is not None:
                 red_score = redundancy_penalty(cols, redundancy_matrix)
-                score = (1 - alpha_penalty) * score + alpha_penalty * red_score
+                score = (1 - alpha_penalty) * float(score) + alpha_penalty * red_score
+
             return float(score)
-    
+
+        reward.__guard_every__ = guard_every
+        reward.__ss_max_n_cal__ = ss_max_n_cal
+        reward.__reward_subsample_n__ = reward_subsample_n
+        reward.__calibrate_mode__ = calibrate_mode
+        reward.__calibrate_after_iter__ = calibrate_after_iter
+        reward.__calib_cache_enabled__ = use_cache
+
         return reward
-
-
+    
     else:
         raise ValueError(f"Unknown reward metric: {metric}")
-
-
