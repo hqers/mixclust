@@ -1,5 +1,8 @@
 # src/mixclust/landmarks.py
+from typing import Callable, Optional, Tuple, Dict, List, Any, Iterable
 import numpy as np
+from sklearn.neighbors import NearestNeighbors
+
 def select_landmarks_kcenter(X_unit, m, seed=42, verbose=False): 
     """
     K-center greedy di ruang cosine (unit-norm).
@@ -72,8 +75,6 @@ def select_landmarks_cluster_aware(X_unit, labels, m, central_frac=0.8, boundary
         L += rest[: m - len(L)]
 
     return sorted(L)
-import numpy as np
-from typing import Callable, Optional, Dict, Any, Iterable
 
 def mini_pam_refine(
     L: np.ndarray,
@@ -369,3 +370,100 @@ def build_candidate_pool(
             pool.append(np.unique(np.concatenate(chosen)))
 
     return np.unique(np.concatenate(pool)) if pool else np.array([], dtype=int)
+# ------------------------------
+# util: subsample clustering + propagate + cluster-aware landmarks (uses existing funcs)
+# ------------------------------
+
+def subsample_and_propagate_labels(
+    df_full: "pd.DataFrame",
+    cat_cols_full: List[str],
+    cluster_fn: Callable,
+    n_clusters: int,
+    random_state: int,
+    subsample_n: Optional[int] = 20000,
+    proto_sample_cap: int = 200,
+    per_cluster_proto: int = 1
+) -> Tuple[np.ndarray, Dict[int, List[int]], Optional[np.ndarray], Optional[np.ndarray]]:
+    """
+    1) If n > subsample_n: cluster on random subsample -> labels_sub
+    2) Propagate labels_sub to full rows via NN on numeric features (fast)
+    3) Build prototypes on full using labels0 (using existing build_prototypes_by_cluster_gower)
+    Returns: (labels0, protos0_dict, idx_sub, labels_sub)
+    """
+    from mixclust.prototypes import build_prototypes_by_cluster_gower
+    from mixclust.aufs_samba.preprocess import prepare_mixed_arrays_no_label
+
+    n = len(df_full)
+    rng = np.random.default_rng(random_state)
+
+    Xn_full, Xc_full, nmin_full, nmax_full, _, _, inv_full = prepare_mixed_arrays_no_label(df_full)
+
+    idx_sub = None
+    labels_sub = None
+
+    if subsample_n is None or n <= subsample_n:
+        # small dataset: cluster full
+        cat_idx_full = [df_full.columns.get_loc(c) for c in cat_cols_full]
+        labels0 = cluster_fn(df_full, cat_idx_full, n_clusters, random_state)
+    else:
+        idx_sub = rng.choice(n, size=subsample_n, replace=False)
+        df_sub = df_full.iloc[idx_sub].reset_index(drop=True)
+        cat_idx_sub = [df_sub.columns.get_loc(c) for c in df_sub.columns if c in cat_cols_full]
+        labels_sub = cluster_fn(df_sub, cat_idx_sub, n_clusters, random_state)
+        Xn_sub, Xc_sub, _, _, _, _, _ = prepare_mixed_arrays_no_label(df_sub)
+
+        # propagate using numeric NN if numeric exists
+        if Xn_sub.shape[1] > 0 and Xn_full.shape[1] > 0:
+            nn = NearestNeighbors(n_neighbors=1, algorithm="auto").fit(Xn_sub)
+            _, idx_nn = nn.kneighbors(Xn_full, return_distance=True)
+            labels0 = labels_sub[idx_nn.ravel()]
+        else:
+            # fallback: string-signature matching
+            sig_sub = df_sub.astype(str).agg('-'.join, axis=1).values
+            sig_full = df_full.astype(str).agg('-'.join, axis=1).values
+            map_idx = {s:i for i,s in enumerate(sig_sub)}
+            labels0 = np.array([ labels_sub[map_idx.get(s, 0)] for s in sig_full ], dtype=int)
+
+    # build prototypes on full arrays
+    try:
+        protos0 = build_prototypes_by_cluster_gower(
+            labels0, Xn_full, Xc_full, nmin_full, nmax_full,
+            per_cluster=per_cluster_proto, sample_cap=proto_sample_cap,
+            seed=random_state, feature_mask_num=None, feature_mask_cat=None, inv_rng=inv_full
+        )
+    except Exception:
+        protos0 = {}
+
+    return np.asarray(labels0, dtype=int), protos0, idx_sub, labels_sub
+    
+def cluster_aware_landmarks_on_subsample(
+    df_full: "pd.DataFrame",
+    idx_sub: Optional[np.ndarray],
+    labels_sub: Optional[np.ndarray],
+    labels_full: np.ndarray,
+    m_cap: int,
+    per_cluster_min: int,
+    random_state: int,
+    select_landmarks_fn: Optional[Callable] = None
+) -> np.ndarray:
+    """
+    Compute cluster-aware landmarks on subsample (if provided) using existing select_landmarks_cluster_aware,
+    then map selected subsample indices to full indices. Fallback to stratified selection on full if necessary.
+    """
+    rng = np.random.default_rng(random_state)
+    # try subsample path
+    if idx_sub is not None and labels_sub is not None and select_landmarks_fn is not None:
+        try:
+            df_sub = df_full.iloc[idx_sub].reset_index(drop=True)
+            # attempt build_features only for subsample (cheaper)
+            from mixclust.features import build_features
+            X_unit_sub, _, _ = build_features(df_sub, label_col=None, scaler_type="standard", unit_norm=True)
+            sel_sub = select_landmarks_fn(X_unit_sub, labels_sub, m_cap,
+                                          central_frac=0.8, boundary_frac=0.2, per_cluster_min=per_cluster_min, seed=int(rng.integers(1<<30)))
+            sel_full = np.array([ int(idx_sub[i]) for i in sel_sub ], dtype=int)
+            return sel_full[:m_cap]
+        except Exception:
+            pass
+
+    # fallback: stratified on full labels
+    return stratified_landmarks(labels_full, m_cap, per_cluster_min, rng)
