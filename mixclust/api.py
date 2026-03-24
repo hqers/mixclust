@@ -1,4 +1,4 @@
-# mixclust/api.py
+# dynamic_clustering/src/mixclust/aufs_samba/api.py
 #
 # ARSITEKTUR FIX: Phase B menggunakan kembali cache Phase A
 #
@@ -32,20 +32,20 @@ import numpy as np
 import pandas as pd
 import random
 
-from .core.preprocess import preprocess_mixed_data, prepare_mixed_arrays_no_label
-from .aufs.redundancy import build_redundancy_matrix, init_by_least_redundant, make_mab_reward_from_matrix
-from .aufs.mab import mab_explore
-from .aufs.sa import simulated_annealing
-from .aufs.reward import make_sa_reward
-from .metrics.silhouette import full_silhouette_gower_subsample
-from .clustering.controller import (
+from .preprocess import preprocess_mixed_data, prepare_mixed_arrays_no_label
+from .redundancy import build_redundancy_matrix, init_by_least_redundant, make_mab_reward_from_matrix
+from .mab import mab_explore
+from .sa import simulated_annealing
+from .reward import make_sa_reward
+from mixclust.silhouette import full_silhouette_gower_subsample
+from mixclust.utils.controller import (
     make_auto_cluster_fn,
     find_best_clustering_from_subsets,
 )
-from .clustering.cluster_adapters import auto_adapter
+from mixclust.utils.cluster_adapters import auto_adapter
 
 # ── BARU: PhaseACache infrastructure ──
-from .aufs.phase_a_cache import PhaseACache, _extract_phase_a_cache
+from mixclust.utils.phase_a_cache import PhaseACache, _extract_phase_a_cache
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -140,6 +140,7 @@ class AUFSParams:
     use_redundancy_penalty: bool = True
     reward_alpha_penalty: float = 0.3
     ss_max_n: int = 2000
+    force_lsil_proxy: bool = False  # True = paksa lsil_fixed_calibrated meski n < ss_max_n
     per_cluster_proto_if_many: int = 1
     lsil_proto_sample_cap: int = 200
     lsil_agg_mode: str = "topk"
@@ -212,7 +213,10 @@ def _resolve_engine(df: pd.DataFrame, params: AUFSParams, n_clusters_user):
     elif mode == "AB":
         return "lsil_fixed", False, auto_adapter, n_clusters_user
     elif mode == "C":
-        reward_metric = "silhouette_gower" if n <= params.ss_max_n else "lsil_fixed_calibrated"
+        if params.force_lsil_proxy:
+            reward_metric = "lsil_fixed_calibrated"  # force — skip SS Gower exact
+        else:
+            reward_metric = "silhouette_gower" if n <= params.ss_max_n else "lsil_fixed_calibrated"
         dynamic_k = bool(params.auto_k)
         return reward_metric, dynamic_k, auto_adapter, n_clusters_user
     else:
@@ -470,7 +474,7 @@ def run_aufs_samba(
         # DAV: aktif jika dav_anchor_cols diisi
         _dav_Va = getattr(params, 'dav_anchor_cols', None)
         if _dav_Va:
-            from .utils.dav import find_best_clustering_dav
+            from mixclust.utils.dav import find_best_clustering_dav
             finalB = find_best_clustering_dav(
                 df_full=df,
                 top_subsets=cand_subsets,
@@ -535,7 +539,7 @@ def run_aufs_samba(
         and final_labels is not None
     ):
         try:
-            from .clustering.controller import structural_control_lnc
+            from mixclust.utils.controller import structural_control_lnc
             sub_sc = df[best_cols]
             cat_cols_sc = [c for c in best_cols if c in cat_cols]
             sc_obj = structural_control_lnc(

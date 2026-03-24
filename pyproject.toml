@@ -1,6 +1,6 @@
 [project]
 name = "mixclust"
-version = "1.0.0"
+version = "1.0.1"
 description = "Adaptive mixed-type clustering with AUFS-Samba, L-Sil, LNC*, and dynamic controller"
 readme = "README.md"
 requires-python = ">=3.9"
