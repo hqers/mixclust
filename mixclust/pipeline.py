@@ -1,4 +1,4 @@
-# dynamic_clustering/src/mixclust/pipeline/generic_end2end.py
+# mixclust/pipeline.py
 # Updated: expose hac_mode, cluster_adapter_lambda, enable_screening
 from __future__ import annotations
 import os, json, time
@@ -9,46 +9,6 @@ import numpy as np
 from .api import run_aufs_samba, AUFSParams
 from .reporting.profiles import build_profiles_table
 from .clustering.cluster_profiling import profile_clusters
-
-class _SafeJSONEncoder(json.JSONEncoder):
-    """Ganti NaN/Inf dengan null agar JSON valid per standar RFC 8259."""
-    def default(self, obj):
-        if isinstance(obj, float):
-            if obj != obj or obj == float('inf') or obj == float('-inf'):
-                return None
-        return super().default(obj)
-
-    def iterencode(self, o, _one_shot=False):
-        # patch float serialization
-        if isinstance(o, float):
-            if o != o or o == float('inf') or o == float('-inf'):
-                return iter(['null'])
-        return super().iterencode(o, _one_shot)
-
-
-def _sanitize_for_json(obj):
-    """Rekursif ganti nan/inf dengan None sebelum json.dump."""
-    if isinstance(obj, float):
-        if obj != obj or obj == float('inf') or obj == float('-inf'):
-            return None
-        return obj
-    if isinstance(obj, dict):
-        return {k: _sanitize_for_json(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_sanitize_for_json(v) for v in obj]
-    if isinstance(obj, np.floating):
-        v = float(obj)
-        return None if (v != v or v == float('inf') or v == float('-inf')) else v
-    if isinstance(obj, np.integer):
-        return int(obj)
-    if isinstance(obj, np.ndarray):
-        return _sanitize_for_json(obj.tolist())
-    return obj
-
-
-def _safe_json_dump(obj, f, **kwargs):
-    json.dump(_sanitize_for_json(obj), f, **kwargs)
-
 
 def _infer_id_col(df: pd.DataFrame, id_col: Optional[str]) -> Optional[str]:
     if id_col and id_col in df.columns:
@@ -144,7 +104,7 @@ def run_generic_end2end(
 
     # Simpan config & features
     with open(os.path.join(outdir, "config.json"), "w", encoding="utf-8") as f:
-        _safe_json_dump(info.get("params", {}), f, ensure_ascii=False, indent=2)
+        json.dump(info.get("params", {}), f, ensure_ascii=False, indent=2)
     pd.Series(best_cols, name="feature").to_csv(
         os.path.join(outdir, "features.csv"), index=False
     )
@@ -168,7 +128,7 @@ def run_generic_end2end(
         cat_cols=cat_cols_list, topk=8
     )
     with open(os.path.join(outdir, "profiles.json"), "w", encoding="utf-8") as f:
-        _safe_json_dump(prof, f, ensure_ascii=False, indent=2)
+        json.dump(prof, f, ensure_ascii=False, indent=2)
 
     table = build_profiles_table(df_ready, labels, best_cols)
     table.to_csv(os.path.join(outdir, "profiles_table.csv"), index=False)
@@ -224,7 +184,7 @@ def run_generic_end2end(
         "dav": dav_info or None,                         # None jika DAV tidak aktif
     }
     with open(os.path.join(outdir, "metrics_internal.json"), "w", encoding="utf-8") as f:
-        _safe_json_dump(metrics, f, ensure_ascii=False, indent=2)
+        json.dump(metrics, f, ensure_ascii=False, indent=2)
 
     # ── Excel summary (satu baris per run, mudah dibandingkan antar seed/dataset) ──
     excel_row = {

@@ -146,28 +146,7 @@ def build_redundancy_matrix(
         fingerprint = _make_fingerprint(df, k)
         cached = _load_cache(cache_path, fingerprint, verbose=verbose)
         if cached is not None:
-            # Intersect dengan kolom df — safety net jika ada kolom
-            # yang tidak matching (misal cache format lama)
-            df_cols = set(df.columns.tolist())
-            filtered = {
-                c: {k2: v for k2, v in row.items() if k2 in df_cols}
-                for c, row in cached.items()
-                if c in df_cols
-            }
-            if len(filtered) != df.shape[1] and verbose:
-                missing = df_cols - set(filtered.keys())
-                extra   = set(filtered.keys()) - df_cols
-                if missing:
-                    print(f"[redundancy] Cache miss kolom: {missing} — akan dihitung ulang.")
-                    # kolom ada di df tapi tidak di cache → cache tidak valid
-                    pass
-                else:
-                    return filtered
-            elif len(filtered) == df.shape[1]:
-                return filtered
-            # jika ada kolom df yang tidak di cache → hitung ulang
-            if verbose:
-                print("[redundancy] Cache tidak lengkap untuk dataset ini — dihitung ulang.")
+            return cached
 
     # ── Hitung dari scratch ───────────────────────────────────────────────────
     df_work = df

@@ -33,10 +33,10 @@ import pandas as pd
 import random
 
 from .core.preprocess import preprocess_mixed_data, prepare_mixed_arrays_no_label
-from .redundancy import build_redundancy_matrix, init_by_least_redundant, make_mab_reward_from_matrix
-from .mab import mab_explore
-from .sa import simulated_annealing
-from .reward import make_sa_reward
+from .aufs.redundancy import build_redundancy_matrix, init_by_least_redundant, make_mab_reward_from_matrix
+from .aufs.mab import mab_explore
+from .aufs.sa import simulated_annealing
+from .aufs.reward import make_sa_reward
 from mixclust.silhouette import full_silhouette_gower_subsample
 from mixclust.utils.controller import (
     make_auto_cluster_fn,
