@@ -44,14 +44,14 @@ def profile_clusters(X_df: pd.DataFrame, labels: np.ndarray, cat_cols: list[str]
                 H, p = kruskal(*vals)
             stats["_anova_p"] = float(p)
         except Exception:
-            stats["_anova_p"] = np.nan
+            stats["_anova_p"] = None
 
         # effect size aggregate (CIS-B)
         try:
             cis_val = cis_cohensd_feature(arr_full, X_df["__label__"].values, agg="mean")
             stats["_cis_cohensd_mean"] = float(cis_val)
         except Exception:
-            stats["_cis_cohensd_mean"] = float(np.nan)
+            stats["_cis_cohensd_mean"] = None
 
         num_stats[col] = stats
     out["numeric"] = num_stats
@@ -64,7 +64,11 @@ def profile_clusters(X_df: pd.DataFrame, labels: np.ndarray, cat_cols: list[str]
         global_prop = X_col_str.value_counts(normalize=True)
         for k, g in groups.items():
             prop = g[col].astype(str).value_counts(normalize=True)
+            # Reindex ke semua kategori global, isi 0 kalau tidak ada di klaster ini
+            prop = prop.reindex(global_prop.index, fill_value=0.0)
             lift = (prop / (global_prop + 1e-12)).sort_values(ascending=False)
+            # Ganti inf/-inf dengan 0 (kategori tidak ada di global tapi ada di klaster)
+            lift = lift.replace([np.inf, -np.inf], 0.0)
             stats[k] = {"top": lift.head(topk).to_dict(), "n_unique": int(g[col].nunique())}
         # chi2 & Cramer's V
         try:
@@ -73,8 +77,8 @@ def profile_clusters(X_df: pd.DataFrame, labels: np.ndarray, cat_cols: list[str]
             stats["_chi2_p"] = float(p)
             stats["_cramers_v"] = float(cramers_v_from_crosstab(tab))
         except Exception:
-            stats["_chi2_p"] = np.nan
-            stats["_cramers_v"] = np.nan
+            stats["_chi2_p"] = None
+            stats["_cramers_v"] = None
         cat_stats[col] = stats
     out["categorical"] = cat_stats
 
@@ -93,7 +97,7 @@ def cramers_v_from_crosstab(ct: pd.DataFrame) -> float:
             return float(0.0)
         return float(math.sqrt((chi2 / n) / denom))
     except Exception:
-        return float(np.nan)
+        return None
 
 # ---------- Cohen's d (two sample effect size) ----------
 def cohens_d_two_groups(a: np.ndarray, b: np.ndarray) -> float:
@@ -154,4 +158,4 @@ def cis_mutual_info_discrete(feature, labels, n_bins: int = 10):
         Hc = -np.sum([p * math.log(p + 1e-12) for p in probs if p > 0])
         return float(mi[0] / (Hc + 1e-12))
     except Exception:
-        return float(np.nan)
+        return None
