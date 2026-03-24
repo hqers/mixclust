@@ -1,0 +1,9 @@
+numpy>=1.23
+pandas>=1.5
+scikit-learn>=1.2
+kmodes>=0.12
+scipy>=1.9
+joblib>=1.2
+tqdm
+openpyxl
+hnswlib  # optional, falls back to sklearn NearestNeighbors

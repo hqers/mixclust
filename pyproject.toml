@@ -1,0 +1,44 @@
+[project]
+name = "mixclust"
+version = "0.2.0"
+description = "Adaptive mixed-type clustering with AUFS-Samba, L-Sil, LNC*, and dynamic controller"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Hasta Pratama", email = "33220015@std.stei.itb.ac.id" }]
+keywords = ["clustering", "mixed-type", "feature-selection", "household-survey"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "numpy>=1.23",
+    "pandas>=1.5",
+    "scikit-learn>=1.2",
+    "kmodes>=0.12",
+    "scipy>=1.9",
+    "joblib>=1.2",
+    "tqdm",
+    "openpyxl",
+]
+
+[project.optional-dependencies]
+dev  = ["pytest", "jupyter", "matplotlib", "seaborn"]
+hnsw = ["hnswlib"]
+
+[project.urls]
+Homepage   = "https://hqers.my.id/mixclust/"
+Repository = "https://github.com/hqers/mixclust"
+
+[build-system]
+requires      = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where   = ["."]
+include = ["mixclust*"]
+exclude = ["tests*", "notebooks*", "*.egg-info"]
+
+[tool.setuptools.package-data]
+mixclust = ["py.typed"]
