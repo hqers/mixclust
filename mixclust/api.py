@@ -32,7 +32,7 @@ import numpy as np
 import pandas as pd
 import random
 
-from .preprocess import preprocess_mixed_data, prepare_mixed_arrays_no_label
+from .core.preprocess import preprocess_mixed_data, prepare_mixed_arrays_no_label
 from .redundancy import build_redundancy_matrix, init_by_least_redundant, make_mab_reward_from_matrix
 from .mab import mab_explore
 from .sa import simulated_annealing
@@ -140,7 +140,7 @@ class AUFSParams:
     use_redundancy_penalty: bool = True
     reward_alpha_penalty: float = 0.3
     ss_max_n: int = 2000
-    force_lsil_proxy: bool = False  # True = paksa lsil_fixed_calibrated meski n < ss_max_n
+    auto_reward: bool = True        # False = pakai reward_metric dari params, True = Engine C pilih otomatis
     per_cluster_proto_if_many: int = 1
     lsil_proto_sample_cap: int = 200
     lsil_agg_mode: str = "topk"
@@ -213,10 +213,10 @@ def _resolve_engine(df: pd.DataFrame, params: AUFSParams, n_clusters_user):
     elif mode == "AB":
         return "lsil_fixed", False, auto_adapter, n_clusters_user
     elif mode == "C":
-        if params.force_lsil_proxy:
-            reward_metric = "lsil_fixed_calibrated"  # force — skip SS Gower exact
-        else:
+        if params.auto_reward:
             reward_metric = "silhouette_gower" if n <= params.ss_max_n else "lsil_fixed_calibrated"
+        else:
+            reward_metric = params.reward_metric  # pakai pilihan user langsung
         dynamic_k = bool(params.auto_k)
         return reward_metric, dynamic_k, auto_adapter, n_clusters_user
     else:
