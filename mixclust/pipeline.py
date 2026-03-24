@@ -157,21 +157,48 @@ def run_generic_end2end(
     table = build_profiles_table(df_ready, labels, best_cols)
     table.to_csv(os.path.join(outdir, "profiles_table.csv"), index=False)
 
-    desc_lines = ["# Cluster Profiles (Generic)\n"]
-    for _, r in table.sort_values("cluster").iterrows():
-        k = int(r["cluster"]); frac = float(r.get("fraction", 0.0))*100
-        picks = []
-        for key in (
-            "PlantProteinShare","FVShare","ProcessedShare","PreparedFoodShare",
-            "TobaccoShare","EnergyBurden","NonFoodBurden","FoodShare",
-            "DDS14_norm","DDS13_noTob_norm","DDS12_noTobPrep_norm"
-        ):
-            if key in r and pd.notna(r[key]):
-                picks.append(f"{key}≈{float(r[key]):.2f}")
+    # ── profiles.md — generik, pakai kolom yang benar-benar ada ──
+    num_cols_best  = [c for c in best_cols if c not in cat_cols_list]
+    cat_cols_best  = [c for c in best_cols if c in cat_cols_list]
+
+    desc_lines = [
+        "# Cluster Profiles\n",
+        f"Dataset  : {len(df_ready):,} rows × {df_ready.shape[1]} cols  ",
+        f"Features : {len(best_cols)} selected ({len(num_cols_best)} numeric, {len(cat_cols_best)} categorical)  ",
+        f"K        : {len(set(labels))} clusters\n",
+    ]
+
+    # Ambil top-1 kategori per fitur kategorik dari prof
+    prof_cat = prof.get("categorical", {})
+    prof_num = prof.get("numeric", {})
+
+    for k in sorted(set(labels)):
+        frac = float(prof["fraction"].get(str(k), prof["fraction"].get(k, 0))) * 100
+        size = int(prof["size"].get(str(k), prof["size"].get(k, 0)))
+        parts = []
+
+        # Numerik — tampilkan mean dan diff vs global
+        for col in num_cols_best:
+            d = prof_num.get(col, {}).get(str(k)) or prof_num.get(col, {}).get(k)
+            if d and d.get("mean") is not None:
+                diff = d.get("diff_vs_global", 0) or 0
+                sign = "+" if diff >= 0 else ""
+                parts.append(f"{col}={d['mean']:.2f}({sign}{diff:.2f})")
+
+        # Kategorik — tampilkan top category dengan lift tertinggi
+        for col in cat_cols_best:
+            cd = prof_cat.get(col, {}).get(str(k)) or prof_cat.get(col, {}).get(k)
+            if cd and cd.get("top"):
+                top_cat = max(cd["top"], key=lambda x: cd["top"][x] or 0)
+                top_lift = cd["top"][top_cat]
+                if top_lift and top_lift > 1.0:
+                    parts.append(f"{col}={top_cat}(lift={top_lift:.2f})")
+
         desc_lines.append(
-            f"- Cluster {k} ({frac:.1f}%): "
-            + (", ".join(picks) if picks else "mixed indicators")
+            f"- Cluster {k} ({frac:.1f}%, n={size:,}): "
+            + (", ".join(parts) if parts else "no dominant features")
         )
+
     with open(os.path.join(outdir, "profiles.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(desc_lines))
 
