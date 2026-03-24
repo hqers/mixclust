@@ -1,4 +1,4 @@
-# dynamic_clustering/src/mixclust/aufs_samba/api.py
+# mixclust/api.py
 #
 # ARSITEKTUR FIX: Phase B menggunakan kembali cache Phase A
 #
@@ -37,15 +37,15 @@ from .aufs.redundancy import build_redundancy_matrix, init_by_least_redundant, m
 from .aufs.mab import mab_explore
 from .aufs.sa import simulated_annealing
 from .aufs.reward import make_sa_reward
-from mixclust.silhouette import full_silhouette_gower_subsample
-from mixclust.utils.controller import (
+from .metrics.silhouette import full_silhouette_gower_subsample
+from .clustering.controller import (
     make_auto_cluster_fn,
     find_best_clustering_from_subsets,
 )
-from mixclust.utils.cluster_adapters import auto_adapter
+from .clustering.cluster_adapters import auto_adapter
 
 # ── BARU: PhaseACache infrastructure ──
-from mixclust.utils.phase_a_cache import PhaseACache, _extract_phase_a_cache
+from .aufs.phase_a_cache import PhaseACache, _extract_phase_a_cache
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -140,7 +140,7 @@ class AUFSParams:
     use_redundancy_penalty: bool = True
     reward_alpha_penalty: float = 0.3
     ss_max_n: int = 2000
-    auto_reward: bool = True        # False = pakai reward_metric dari params, True = Engine C pilih otomatis
+    auto_reward: bool = True        # False = pakai reward_metric dari params langsung
     per_cluster_proto_if_many: int = 1
     lsil_proto_sample_cap: int = 200
     lsil_agg_mode: str = "topk"
@@ -474,7 +474,7 @@ def run_aufs_samba(
         # DAV: aktif jika dav_anchor_cols diisi
         _dav_Va = getattr(params, 'dav_anchor_cols', None)
         if _dav_Va:
-            from mixclust.utils.dav import find_best_clustering_dav
+            from .utils.dav import find_best_clustering_dav
             finalB = find_best_clustering_dav(
                 df_full=df,
                 top_subsets=cand_subsets,
@@ -539,7 +539,7 @@ def run_aufs_samba(
         and final_labels is not None
     ):
         try:
-            from mixclust.utils.controller import structural_control_lnc
+            from .clustering.controller import structural_control_lnc
             sub_sc = df[best_cols]
             cat_cols_sc = [c for c in best_cols if c in cat_cols]
             sc_obj = structural_control_lnc(
