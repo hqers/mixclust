@@ -174,3 +174,74 @@ def gower_to_one_mixed_scaled(
         return np.ones(m, dtype=np.float32)
 
     return (out_sum / float(total_feats)).astype(np.float32)
+
+
+def gower_distances_to_landmarks(
+    X_num: np.ndarray,
+    X_cat: np.ndarray,
+    num_min: np.ndarray,
+    num_max: np.ndarray,
+    landmark_idx: np.ndarray,
+    *,
+    feature_mask_num: np.ndarray | None = None,
+    feature_mask_cat: np.ndarray | None = None,
+    inv_rng: np.ndarray | None = None,
+) -> np.ndarray:
+    """
+    Vectorized Gower distance dari SEMUA n titik ke |L| landmark sekaligus.
+    Kompleksitas: O(n * |L| * p) — dominant cost paper Theorem 1.
+
+    Returns
+    -------
+    D : np.ndarray shape (n, |L|), float32
+        D[i, j] = gower(X[i], X[landmark_idx[j]])
+    """
+    landmark_idx = np.asarray(landmark_idx, dtype=int)
+    m = len(landmark_idx)
+    if m == 0:
+        return np.zeros((0, 0), dtype=np.float32)
+
+    n = X_num.shape[0] if X_num is not None else X_cat.shape[0]
+    D = np.zeros((n, m), dtype=np.float32)
+    total_feats = 0
+
+    # ---- Numerik ----
+    if X_num is not None and X_num.ndim == 2 and X_num.shape[1] > 0:
+        p = X_num.shape[1]
+        num_mask = _ensure_bool_mask(feature_mask_num, p)
+        p_num = int(np.sum(num_mask))
+        if p_num > 0:
+            if inv_rng is None:
+                rng = (np.asarray(num_max, dtype=np.float32)
+                       - np.asarray(num_min, dtype=np.float32))[num_mask]
+                rng[rng == 0.0] = 1.0
+                scale = (1.0 / rng).astype(np.float32)
+            else:
+                scale = np.asarray(inv_rng, dtype=np.float32)[num_mask]
+
+            X_n = X_num[:, num_mask].astype(np.float32)          # (n, p_num)
+            L_n = X_num[landmark_idx][:, num_mask].astype(np.float32)  # (m, p_num)
+            # |X[i,k] - L[j,k]| * scale[k]  →  sum over k  →  (n, m)
+            # Loop over p_num to avoid huge memory (n*m*p_num)
+            for k in range(p_num):
+                D += np.abs(
+                    X_n[:, k:k+1] - L_n[:, k:k+1].T
+                ) * scale[k]
+            total_feats += p_num
+
+    # ---- Kategorik ----
+    if X_cat is not None and X_cat.ndim == 2 and X_cat.shape[1] > 0:
+        q = X_cat.shape[1]
+        cat_mask = _ensure_bool_mask(feature_mask_cat, q)
+        p_cat = int(np.sum(cat_mask))
+        if p_cat > 0:
+            X_c = X_cat[:, cat_mask]          # (n, p_cat)
+            L_c = X_cat[landmark_idx][:, cat_mask]  # (m, p_cat)
+            for k in range(p_cat):
+                D += (X_c[:, k:k+1] != L_c[:, k:k+1].T).astype(np.float32)
+            total_feats += p_cat
+
+    if total_feats > 0:
+        D /= float(total_feats)
+
+    return D

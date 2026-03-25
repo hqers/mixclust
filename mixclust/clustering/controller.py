@@ -59,6 +59,7 @@ except Exception:
 from ..core.preprocess import preprocess_mixed_data, prepare_mixed_arrays_no_label
 from sklearn.preprocessing import normalize
 from ..core.landmarks import select_landmarks_kcenter, select_landmarks_cluster_aware
+from ..core.adaptive import adaptive_landmark_count
 from ..core.prototypes import build_prototypes_by_cluster_gower
 
 # Import PhaseACache
@@ -330,7 +331,6 @@ def _eval_with_phase_a_cache(
                 inv_rng=cache.inv_rng_full,
                 agg_mode=lsil_agg_mode,
                 topk=lsil_topk,
-                use_landmarks_as_references=False,
             ))
     except Exception:
         pass
@@ -620,7 +620,8 @@ def structural_control_lnc(
     lnc_k: int = 50,
     lnc_alpha: float = 0.7,
     landmark_mode: str = "cluster_aware",
-    lm_max_frac: float = 0.2,
+    lm_c: float = 3.0,             # c dalam c*sqrt(n) (Theorem 1 JDSA)
+    lm_cap_frac: float = 0.2,      # batas atas fraksional
     lm_per_cluster_min: int = 3,
     central_frac: float = 0.8,
     boundary_frac: float = 0.2,
@@ -657,7 +658,9 @@ def structural_control_lnc(
         )
     X_num, X_cat, num_min, num_max, mask_num, mask_cat, inv_rng = \
         prepare_mixed_arrays_no_label(X_df)
-    m = min(int(lm_max_frac * n), max(20, n // 10))
+    K = len(np.unique(labels))
+    m = adaptive_landmark_count(n, K=K, c=lm_c, cap_frac=lm_cap_frac,
+                                per_cluster_min=lm_per_cluster_min)
     if landmark_mode == "cluster_aware":
         L = select_landmarks_cluster_aware(
             X_unit, labels, m,

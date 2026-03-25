@@ -141,10 +141,10 @@ class AUFSParams:
     reward_alpha_penalty: float = 0.3
     ss_max_n: int = 2000
     auto_reward: bool = True        # False = pakai reward_metric dari params langsung
-    per_cluster_proto_if_many: int = 1
-    lsil_proto_sample_cap: int = 200
     lsil_agg_mode: str = "topk"
-    lsil_topk: int = 1
+    lsil_topk: int = 3              # paper default r=3
+    lsil_c: float = 3.0            # |L|=c*sqrt(n), Theorem 1 JDSA
+    lsil_cap_frac: float = 0.2     # batas atas landmark fraction
 
     # Clustering
     n_clusters: int = 5
@@ -332,10 +332,10 @@ def run_aufs_samba(
         alpha_penalty=params.reward_alpha_penalty,
         redundancy_matrix=red_mat,
         ss_max_n=params.ss_max_n,
-        per_cluster_proto_if_many=params.per_cluster_proto_if_many,
-        lsil_proto_sample_cap=params.lsil_proto_sample_cap,
         lsil_agg_mode=params.lsil_agg_mode,
         lsil_topk=params.lsil_topk,
+        lsil_c=params.lsil_c,
+        lsil_cap_frac=params.lsil_cap_frac,
         random_state=params.random_state,
         dynamic_k=False,
         # field kalibrasi dari params (alias lama tetap kompatibel)
@@ -690,10 +690,10 @@ def find_best_feature_subsets(
         use_redundancy_penalty=params.use_redundancy_penalty,
         alpha_penalty=params.reward_alpha_penalty,
         redundancy_matrix=red_mat, ss_max_n=params.ss_max_n,
-        per_cluster_proto_if_many=params.per_cluster_proto_if_many,
-        lsil_proto_sample_cap=params.lsil_proto_sample_cap,
         lsil_agg_mode=params.lsil_agg_mode,
         lsil_topk=params.lsil_topk,
+        lsil_c=params.lsil_c,
+        lsil_cap_frac=params.lsil_cap_frac,
         random_state=params.random_state,
     )
 

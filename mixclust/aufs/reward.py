@@ -19,6 +19,7 @@ from time import perf_counter
 from ..core.prototypes import build_prototypes_by_cluster_gower
 from ..metrics.lsil import lsil_using_prototypes_gower
 from ..metrics.silhouette import full_silhouette_gower_subsample
+from ..core.adaptive import adaptive_landmark_count
 from ..core.landmarks import (
     subsample_and_propagate_labels,
     select_landmarks_cluster_aware,
@@ -77,8 +78,8 @@ def make_sa_reward(
     alpha_penalty=0.3,
     redundancy_matrix=None,
     ss_max_n=2000,
-    per_cluster_proto_if_many: int = 1,
-    lsil_proto_sample_cap: int = 200,
+    lsil_c: float = 3.0,           # c dalam c*sqrt(n) (Theorem 1)
+    lsil_cap_frac: float = 0.2,    # cap fraksional maksimum
     lsil_agg_mode="mean",
     lsil_topk=5,
     random_state=42,
@@ -140,8 +141,8 @@ def make_sa_reward(
             [df_full.columns.get_loc(c) for c in df_full.columns if c in cat_cols],
             n_clusters, random_state
         )
-        import math as _math
-        m = min(int(2 * _math.sqrt(len(df_full))), 600)  # paper: |L|=c√n, c=2
+        m = adaptive_landmark_count(len(df_full), K=n_clusters, c=lsil_c,
+                                    cap_frac=lsil_cap_frac)
         L_fixed = select_landmarks_cluster_aware(
             X_unit_full, labels_full, m,
             central_frac=0.8, boundary_frac=0.2,
@@ -161,20 +162,12 @@ def make_sa_reward(
                 return -1.0
             X_num, X_cat, num_min, num_max, mask_num, mask_cat, inv_rng = \
                 prepare_mixed_arrays_no_label(df)
-            protos = build_prototypes_by_cluster_gower(
-                labels_sub, X_num, X_cat, num_min, num_max,
-                per_cluster=per_cluster_proto_if_many,
-                sample_cap=300, seed=random_state,
-                feature_mask_num=mask_num, feature_mask_cat=mask_cat,
-                inv_rng=inv_rng
-            )
             score = lsil_using_prototypes_gower(
-                labels_sub, L_fixed, protos,
+                labels_sub, L_fixed,
                 X_num, X_cat, num_min, num_max,
                 feature_mask_num=mask_num, feature_mask_cat=mask_cat,
                 inv_rng=inv_rng,
                 agg_mode=lsil_agg_mode, topk=lsil_topk,
-                use_landmarks_as_references=False
             )
             if use_redundancy_penalty and redundancy_matrix is not None:
                 red_score = redundancy_penalty(cols, redundancy_matrix)
@@ -200,8 +193,6 @@ def make_sa_reward(
         cat_pos = {c: i for i, c in enumerate(cat_cols_full)}
 
         reward_subsample_n = min(len(df_full), 20000)
-        import math as _math
-        lsil_m_cap = min(int(2 * _math.sqrt(len(df_full))), 600)  # paper: |L|=c√n, c=2
         use_cache = True
 
         labels0, protos0, idx_sub, labels_sub = subsample_and_propagate_labels(
@@ -211,11 +202,10 @@ def make_sa_reward(
             n_clusters=n_clusters,
             random_state=random_state,
             subsample_n=reward_subsample_n,
-            proto_sample_cap=lsil_proto_sample_cap,
-            per_cluster_proto=per_cluster_proto_if_many
+            proto_sample_cap=None,
+            per_cluster_proto=1
         )
 
-        m = lsil_m_cap  # sudah dihitung: c√n
         L_fixed = cluster_aware_landmarks_on_subsample(
             df_full=df_full,
             idx_sub=idx_sub,
@@ -260,7 +250,6 @@ def make_sa_reward(
                     feature_mask_num=mask_num, feature_mask_cat=mask_cat,
                     inv_rng=inv_rng_full,
                     agg_mode=lsil_agg_mode, topk=lsil_topk,
-                use_landmarks_as_references=False
                 )
             except Exception as e:
                 print(f"❌ lsil_fixed gagal utk {cols} → {e}")
@@ -317,13 +306,12 @@ def make_sa_reward(
             n_clusters=n_clusters,
             random_state=random_state,
             subsample_n=reward_subsample_n,
-            proto_sample_cap=lsil_proto_sample_cap,
-            per_cluster_proto=per_cluster_proto_if_many
+            proto_sample_cap=None,
+            per_cluster_proto=1
         )
 
-        import math as _math
-        lsil_m_cap = min(int(2 * _math.sqrt(len(df_full))), 600)  # paper: |L|=c√n, c=2
-        m = lsil_m_cap  # sudah dihitung: c√n
+        m = adaptive_landmark_count(len(df_full), K=n_clusters, c=lsil_c,
+                                    cap_frac=lsil_cap_frac)
         L_fixed = cluster_aware_landmarks_on_subsample(
             df_full=df_full,
             idx_sub=idx_sub,
@@ -336,15 +324,8 @@ def make_sa_reward(
             if 'select_landmarks_cluster_aware' in globals() else None
         )
 
-        if protos0 is None:
-            protos0 = build_prototypes_by_cluster_gower(
-                labels0, X_num_full, X_cat_full, num_min_full, num_max_full,
-                per_cluster=per_cluster_proto_if_many,
-                sample_cap=lsil_proto_sample_cap,
-                seed=random_state,
-                feature_mask_num=None, feature_mask_cat=None,
-                inv_rng=inv_rng_full
-            )
+        # protos0 tidak dipakai lagi — lsil_using_prototypes_gower
+        # langsung pakai L_fixed sebagai referensi klaster
 
         def make_masks_for_subset(cols):
             mnum = np.zeros(X_num_full.shape[1], dtype=bool) \
@@ -379,7 +360,6 @@ def make_sa_reward(
                     feature_mask_num=mask_num, feature_mask_cat=mask_cat,
                     inv_rng=inv_rng_full,
                     agg_mode=lsil_agg_mode, topk=lsil_topk,
-                use_landmarks_as_references=False
                 )
             except Exception:
                 return -1.0

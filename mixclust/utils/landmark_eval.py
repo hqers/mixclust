@@ -17,7 +17,7 @@ from ..metrics.silhouette import full_silhouette_gower_subsample
 from ..core.adaptive import adaptive_landmark_count
 
 # Metrics
-from ..metrics.lsil import lsil_using_prototypes_gower
+from ..metrics.lsil import lsil_using_prototypes_gower, lsil_using_landmarks
 from ..metrics.lnc_star import lnc_star
 
 # Optional cluster adapters (untuk mode dengan cluster_fn custom)
@@ -98,7 +98,7 @@ def evaluate_dataset(
     scaler_type: str = "standard",
     unit_norm: bool = True,
     landmark_mode: str = "cluster_aware",    # "cluster_aware" | "kcenter"
-    lm_max_frac: float = 0.2,
+    lm_max_frac: float = 0.2,   # deprecated — diabaikan, pakai c√n
     lm_per_cluster: int = 5,
     central_frac: float = 0.8,
     boundary_frac: float = 0.2,
@@ -156,9 +156,8 @@ def evaluate_dataset(
     )
 
     # 3) Hitung m adaptif
-    m, H, n_clusters = adaptive_landmark_count(
-        labels, n, lm_max_frac=lm_max_frac, lm_per_cluster=lm_per_cluster
-    )
+    K_clusters = len(np.unique(np.asarray(labels)))
+    m = adaptive_landmark_count(n, K=K_clusters)
     if verbose:
         print(f"  • Landmarks target m={m}  (clusters={n_clusters}, H={H:.3f})")
 
@@ -196,7 +195,6 @@ def evaluate_dataset(
         feature_mask_num=mask_num,
         feature_mask_cat=mask_cat,
         inv_rng=inv_rng,
-        use_landmarks_as_references=False,
     )
 
     # 6) L-Sil (prototipe Gower) & LNC*
@@ -212,7 +210,6 @@ def evaluate_dataset(
         feature_mask_num=mask_num,
         feature_mask_cat=mask_cat,
         inv_rng=inv_rng,
-        use_landmarks_as_references=False,
         agg_mode="topk",
         topk=1,
     )
@@ -252,7 +249,6 @@ def evaluate_dataset(
         feature_mask_num=mask_num,
         feature_mask_cat=mask_cat,
         inv_rng=inv_rng,
-        use_landmarks_as_references=False,
     )
     if verbose:
         print(
@@ -292,7 +288,7 @@ def evaluate_lsil_only(
     scaler_type: str = "standard",
     unit_norm: bool = True,
     landmark_mode: str = "cluster_aware",
-    lm_max_frac: float = 0.2,
+    lm_max_frac: float = 0.2,   # deprecated — diabaikan, pakai c√n
     lm_per_cluster: int = 5,
     central_frac: float = 0.8,
     boundary_frac: float = 0.2,
@@ -330,9 +326,8 @@ def evaluate_lsil_only(
     )
 
     # 3) m adaptif & landmark
-    m, H, n_clusters = adaptive_landmark_count(
-        labels, n, lm_max_frac=lm_max_frac, lm_per_cluster=lm_per_cluster
-    )
+    K_clusters = len(np.unique(np.asarray(labels)))
+    m = adaptive_landmark_count(n, K=K_clusters)
     if landmark_mode == "cluster_aware":
         L = select_landmarks_cluster_aware(
             X_unit,
@@ -360,7 +355,6 @@ def evaluate_lsil_only(
         feature_mask_num=mask_num,
         feature_mask_cat=mask_cat,
         inv_rng=inv_rng,
-        use_landmarks_as_references=False,
     )
 
     # 5) L-Sil
@@ -375,7 +369,6 @@ def evaluate_lsil_only(
         feature_mask_num=mask_num,
         feature_mask_cat=mask_cat,
         inv_rng=inv_rng,
-        use_landmarks_as_references=False,
         agg_mode="topk",
         topk=1,
     )
@@ -399,7 +392,7 @@ def evaluate_lnc_only(
     scaler_type: str = "standard",
     unit_norm: bool = True,
     landmark_mode: str = "cluster_aware",
-    lm_max_frac: float = 0.2,
+    lm_max_frac: float = 0.2,   # deprecated — diabaikan, pakai c√n
     lm_per_cluster: int = 5,
     central_frac: float = 0.8,
     boundary_frac: float = 0.2,
@@ -438,9 +431,8 @@ def evaluate_lnc_only(
     )
 
     # 3) m adaptif & landmark
-    m, H, n_clusters = adaptive_landmark_count(
-        labels, n, lm_max_frac=lm_max_frac, lm_per_cluster=lm_per_cluster
-    )
+    K_clusters = len(np.unique(np.asarray(labels)))
+    m = adaptive_landmark_count(n, K=K_clusters)
     if landmark_mode == "cluster_aware":
         L = select_landmarks_cluster_aware(
             X_unit,
@@ -500,7 +492,7 @@ def evaluate_dataframe_phaseB(
     scaler_type: str = "standard",
     unit_norm: bool = True,
     landmark_mode: str = "cluster_aware",
-    lm_max_frac: float = 0.2,
+    lm_max_frac: float = 0.2,   # deprecated — diabaikan, pakai c√n
     lm_per_cluster: int = 5,
     central_frac: float = 0.8,
     boundary_frac: float = 0.2,
@@ -552,9 +544,8 @@ def evaluate_dataframe_phaseB(
     )
 
     # 3) m adaptif & landmark
-    m, H, n_clusters_adapt = adaptive_landmark_count(
-        labels, n, lm_max_frac=lm_max_frac, lm_per_cluster=lm_per_cluster
-    )
+    K_clusters = len(np.unique(np.asarray(labels)))
+    m = adaptive_landmark_count(n, K=K_clusters)
     if landmark_mode == "cluster_aware":
         L = select_landmarks_cluster_aware(
             X_unit,
@@ -583,7 +574,6 @@ def evaluate_dataframe_phaseB(
         feature_mask_num=mask_num,
         feature_mask_cat=mask_cat,
         inv_rng=inv_rng,
-        use_landmarks_as_references=False,
     )
 
     # 5) L-Sil & LNC*
@@ -598,7 +588,6 @@ def evaluate_dataframe_phaseB(
         feature_mask_num=mask_num,
         feature_mask_cat=mask_cat,
         inv_rng=inv_rng,
-        use_landmarks_as_references=False,
         agg_mode="topk",
         topk=1,
     )
