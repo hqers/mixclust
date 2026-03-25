@@ -173,7 +173,8 @@ def make_sa_reward(
                 X_num, X_cat, num_min, num_max,
                 feature_mask_num=mask_num, feature_mask_cat=mask_cat,
                 inv_rng=inv_rng,
-                agg_mode=lsil_agg_mode, topk=lsil_topk
+                agg_mode=lsil_agg_mode, topk=lsil_topk,
+                use_landmarks_as_references=False
             )
             if use_redundancy_penalty and redundancy_matrix is not None:
                 red_score = redundancy_penalty(cols, redundancy_matrix)
@@ -258,7 +259,8 @@ def make_sa_reward(
                     X_num_full, X_cat_full, num_min_full, num_max_full,
                     feature_mask_num=mask_num, feature_mask_cat=mask_cat,
                     inv_rng=inv_rng_full,
-                    agg_mode=lsil_agg_mode, topk=lsil_topk
+                    agg_mode=lsil_agg_mode, topk=lsil_topk,
+                use_landmarks_as_references=False
                 )
             except Exception as e:
                 print(f"❌ lsil_fixed gagal utk {cols} → {e}")
@@ -376,7 +378,8 @@ def make_sa_reward(
                     X_num_full, X_cat_full, num_min_full, num_max_full,
                     feature_mask_num=mask_num, feature_mask_cat=mask_cat,
                     inv_rng=inv_rng_full,
-                    agg_mode=lsil_agg_mode, topk=lsil_topk
+                    agg_mode=lsil_agg_mode, topk=lsil_topk,
+                use_landmarks_as_references=False
                 )
             except Exception:
                 return -1.0

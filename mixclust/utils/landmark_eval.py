@@ -196,6 +196,7 @@ def evaluate_dataset(
         feature_mask_num=mask_num,
         feature_mask_cat=mask_cat,
         inv_rng=inv_rng,
+        use_landmarks_as_references=False,
     )
 
     # 6) L-Sil (prototipe Gower) & LNC*
@@ -211,6 +212,7 @@ def evaluate_dataset(
         feature_mask_num=mask_num,
         feature_mask_cat=mask_cat,
         inv_rng=inv_rng,
+        use_landmarks_as_references=False,
         agg_mode="topk",
         topk=1,
     )
@@ -250,6 +252,7 @@ def evaluate_dataset(
         feature_mask_num=mask_num,
         feature_mask_cat=mask_cat,
         inv_rng=inv_rng,
+        use_landmarks_as_references=False,
     )
     if verbose:
         print(
@@ -357,6 +360,7 @@ def evaluate_lsil_only(
         feature_mask_num=mask_num,
         feature_mask_cat=mask_cat,
         inv_rng=inv_rng,
+        use_landmarks_as_references=False,
     )
 
     # 5) L-Sil
@@ -371,6 +375,7 @@ def evaluate_lsil_only(
         feature_mask_num=mask_num,
         feature_mask_cat=mask_cat,
         inv_rng=inv_rng,
+        use_landmarks_as_references=False,
         agg_mode="topk",
         topk=1,
     )
@@ -578,6 +583,7 @@ def evaluate_dataframe_phaseB(
         feature_mask_num=mask_num,
         feature_mask_cat=mask_cat,
         inv_rng=inv_rng,
+        use_landmarks_as_references=False,
     )
 
     # 5) L-Sil & LNC*
@@ -592,6 +598,7 @@ def evaluate_dataframe_phaseB(
         feature_mask_num=mask_num,
         feature_mask_cat=mask_cat,
         inv_rng=inv_rng,
+        use_landmarks_as_references=False,
         agg_mode="topk",
         topk=1,
     )

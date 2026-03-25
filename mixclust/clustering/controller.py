@@ -330,6 +330,7 @@ def _eval_with_phase_a_cache(
                 inv_rng=cache.inv_rng_full,
                 agg_mode=lsil_agg_mode,
                 topk=lsil_topk,
+                use_landmarks_as_references=False,
             ))
     except Exception:
         pass
