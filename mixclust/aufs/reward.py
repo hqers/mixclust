@@ -328,6 +328,14 @@ def make_sa_reward(
             per_cluster_proto=1
         )
 
+        # ── DIAGNOSTIK: cek labels0 valid sebelum lanjut ──
+        _n_unique_labels0 = len(np.unique(labels0))
+        print(f"[reward] labels0: n={len(labels0)}, K_unik={_n_unique_labels0}, "
+              f"subsample_n={reward_subsample_n}")
+        if _n_unique_labels0 < 2:
+            print(f"⚠️  [reward] labels0 hanya punya {_n_unique_labels0} klaster! "
+                  f"Semua reward akan -1.0. Cek cluster_fn pada subsample.")
+
         m = adaptive_landmark_count(len(df_full), K=n_clusters, c=lsil_c,
                                     cap_frac=lsil_cap_frac)
         L_fixed = cluster_aware_landmarks_on_subsample(
@@ -341,6 +349,8 @@ def make_sa_reward(
             select_landmarks_fn=select_landmarks_cluster_aware
             if 'select_landmarks_cluster_aware' in globals() else None
         )
+        print(f"[reward] L_fixed: |L|={len(L_fixed)}, m_target={m}, "
+              f"select_fn_ok={'select_landmarks_cluster_aware' in globals()}")
 
         def make_masks_for_subset(cols):
             mnum = np.zeros(X_num_full.shape[1], dtype=bool) \
@@ -366,6 +376,12 @@ def make_sa_reward(
             nonlocal call_count, _calib_cache, lsil_hist_global, ss_hist_global
             if not cols:
                 return -1.0
+            # Guard: jika labels0 tidak valid, seluruh reward tidak bisa dihitung
+            if _n_unique_labels0 < 2:
+                if call_count == 0:
+                    print(f"❌ [reward] Abort: labels0 hanya {_n_unique_labels0} klaster unik.")
+                call_count += 1
+                return -1.0
             call_count += 1
             mask_num, mask_cat = make_masks_for_subset(cols)
             try:
@@ -379,12 +395,13 @@ def make_sa_reward(
                     agg_mode=lsil_agg_mode, topk=lsil_topk,
                 )
             except Exception as e:
-                # Debug: print error pertama kali saja
                 if call_count <= 3:
-                    print(f"❌ lsil_fixed_calibrated gagal (call={call_count}): {e}")
+                    print(f"❌ lsil_fixed_calibrated gagal (call={call_count}): {type(e).__name__}: {e}")
                 return -1.0
 
             if np.isnan(L) or not np.isfinite(L):
+                if call_count <= 3:
+                    print(f"⚠️  [reward] L-Sil = {L} (nan/inf) pada call={call_count}, cols={cols[:3]}...")
                 return -1.0
 
             if (calibrate_mode_eff == "always" and (call_count % guard_every_eff) == 0) or \
