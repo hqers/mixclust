@@ -1,14 +1,34 @@
 # mixclust/aufs/reward.py
 #
-# PERUBAHAN UTAMA:
-#   - reward lsil_fixed_calibrated dan lsil_fixed meng-inject
-#     __phase_a_cache__ ke dalam closure reward function
-#   - Phase B dapat mengambil cache ini via _extract_phase_a_cache()
-#   - Tidak ada perubahan pada logika reward SA (Phase A tetap sama)
+# CHANGELOG v2.1 (Fix pasca refactor lsil_using_landmarks):
 #
-# FIX sebelumnya (tetap berlaku):
-#   - Hapus semua re-import lokal prepare_mixed_arrays_no_label
-#     (mencegah UnboundLocalError)
+#   BUG FIX KRITIS:
+#     Setelah lsil_using_prototypes_gower direfactor menjadi wrapper
+#     lsil_using_landmarks, signature positional args berubah:
+#
+#     LAMA (prototype-based):
+#       lsil_using_prototypes_gower(labels, protos, landmark_idx, X_num, ...)
+#
+#     BARU (landmark-based):
+#       lsil_using_prototypes_gower(labels, landmark_idx, X_num, X_cat, ...)
+#
+#     Akibatnya pemanggilan di cabang lsil_fixed dan lsil_fixed_calibrated
+#     mengirim protos0 ke posisi X_num → TypeError → exception → return -1.0
+#     → SA reward selalu -1.0.
+#
+#   FIX:
+#     1. Hapus protos0 dari pemanggilan lsil_using_prototypes_gower
+#        di cabang lsil_fixed dan lsil_fixed_calibrated.
+#     2. Ganti dengan lsil_using_landmarks secara langsung (lebih bersih).
+#     3. Hapus build_prototypes_by_cluster_gower dari cabang
+#        lsil_fixed_calibrated (tidak diperlukan lagi — protos0 tidak dipakai
+#        oleh lsil_using_landmarks).
+#     4. Tetap simpan protos0 di phase_a_cache untuk kompatibilitas Phase B
+#        (controller.py masih mungkin memakainya sebagai fallback).
+#
+#   EFEK SAMPING POSITIF:
+#     - Build reward lebih cepat karena skip build_prototypes untuk n besar
+#     - Tidak ada perubahan API eksternal
 # ─────────────────────────────────────────────────────────────────
 
 from __future__ import annotations
@@ -17,7 +37,8 @@ import numpy as np, pandas as pd
 from time import perf_counter
 
 from ..core.prototypes import build_prototypes_by_cluster_gower
-from ..metrics.lsil import lsil_using_prototypes_gower
+from ..metrics.lsil import lsil_using_landmarks          # ← import langsung
+from ..metrics.lsil import lsil_using_prototypes_gower   # ← tetap untuk backward-compat
 from ..metrics.silhouette import full_silhouette_gower_subsample
 from ..core.adaptive import adaptive_landmark_count
 from ..core.landmarks import (
@@ -27,8 +48,6 @@ from ..core.landmarks import (
 )
 from ..core.features import build_features
 from ..core.preprocess import prepare_mixed_arrays_no_label
-
-# FIX: import di level modul, bukan di dalam cabang if
 from ..metrics.silhouette import full_silhouette_gower
 
 try:
@@ -78,13 +97,12 @@ def make_sa_reward(
     alpha_penalty=0.3,
     redundancy_matrix=None,
     ss_max_n=2000,
-    lsil_c: float = 3.0,           # c dalam c*sqrt(n) (Theorem 1)
-    lsil_cap_frac: float = 0.2,    # cap fraksional maksimum
+    lsil_c: float = 3.0,
+    lsil_cap_frac: float = 0.2,
     lsil_agg_mode="mean",
     lsil_topk=5,
     random_state=42,
     dynamic_k: bool = False,
-    # Parameter kalibrasi (diteruskan dari AUFSParams)
     guard_every: int = 50,
     ss_max_n_cal: int = 200,
     reward_subsample_n: int = 20000,
@@ -95,7 +113,6 @@ def make_sa_reward(
     # CABANG 1: silhouette_gower
     # ────────────────────────────────────────────────────────────
     if metric == "silhouette_gower":
-        # FIX: tidak ada re-import lokal — sudah diimport di atas
 
         def reward(cols: List[str]) -> float:
             if not cols:
@@ -107,7 +124,7 @@ def make_sa_reward(
                 labels = cluster_fn(df, cat_idx, n_clusters, random_state)
                 if len(set(labels)) < 2:
                     return -1.0
-            except Exception as e:
+            except Exception:
                 return -1.0
             try:
                 X_num, X_cat, num_min, num_max, mask_num, mask_cat, inv_rng = \
@@ -128,7 +145,7 @@ def make_sa_reward(
         return reward
 
     # ────────────────────────────────────────────────────────────
-    # CABANG 2: lsil
+    # CABANG 2: lsil (online — landmark diperbarui tiap iterasi)
     # ────────────────────────────────────────────────────────────
     elif metric == "lsil":
         from ..core.features import build_features, prepare_mixed_arrays
@@ -162,7 +179,8 @@ def make_sa_reward(
                 return -1.0
             X_num, X_cat, num_min, num_max, mask_num, mask_cat, inv_rng = \
                 prepare_mixed_arrays_no_label(df)
-            score = lsil_using_prototypes_gower(
+            # ── FIX: gunakan lsil_using_landmarks langsung ──
+            score = lsil_using_landmarks(
                 labels_sub, L_fixed,
                 X_num, X_cat, num_min, num_max,
                 feature_mask_num=mask_num, feature_mask_cat=mask_cat,
@@ -181,7 +199,6 @@ def make_sa_reward(
     # ────────────────────────────────────────────────────────────
     elif metric == "lsil_fixed":
 
-        # Precompute sekali
         X_num_full, X_cat_full, num_min_full, num_max_full, _, _, inv_rng_full = \
             prepare_mixed_arrays_no_label(df_full)
 
@@ -192,7 +209,7 @@ def make_sa_reward(
         num_pos = {c: i for i, c in enumerate(num_cols_full)}
         cat_pos = {c: i for i, c in enumerate(cat_cols_full)}
 
-        reward_subsample_n = min(len(df_full), 20000)
+        reward_subsample_n_eff = min(len(df_full), 20000)
         use_cache = True
 
         labels0, protos0, idx_sub, labels_sub = subsample_and_propagate_labels(
@@ -201,11 +218,13 @@ def make_sa_reward(
             cluster_fn=cluster_fn,
             n_clusters=n_clusters,
             random_state=random_state,
-            subsample_n=reward_subsample_n,
+            subsample_n=reward_subsample_n_eff,
             proto_sample_cap=None,
             per_cluster_proto=1
         )
 
+        m = adaptive_landmark_count(len(df_full), K=n_clusters, c=lsil_c,
+                                    cap_frac=lsil_cap_frac)
         L_fixed = cluster_aware_landmarks_on_subsample(
             df_full=df_full,
             idx_sub=idx_sub,
@@ -216,10 +235,6 @@ def make_sa_reward(
             random_state=random_state,
             select_landmarks_fn=select_landmarks_cluster_aware
             if 'select_landmarks_cluster_aware' in globals() else None
-        )
-
-        X_unit_full, _, _ = build_features(
-            df_full, label_col=None, scaler_type="standard", unit_norm=True
         )
 
         def make_masks_for_subset(cols):
@@ -244,8 +259,9 @@ def make_sa_reward(
                 return -1.0
             mask_num, mask_cat = make_masks_for_subset(cols)
             try:
-                score = lsil_using_prototypes_gower(
-                    labels0, L_fixed, protos0,
+                # ── FIX: hapus protos0, pakai lsil_using_landmarks langsung ──
+                score = lsil_using_landmarks(
+                    labels0, L_fixed,
                     X_num_full, X_cat_full, num_min_full, num_max_full,
                     feature_mask_num=mask_num, feature_mask_cat=mask_cat,
                     inv_rng=inv_rng_full,
@@ -259,7 +275,6 @@ def make_sa_reward(
                 score = (1 - alpha_penalty) * score + alpha_penalty * red_score
             return float(score)
 
-        # ── INJECT CACHE untuk Phase B ──
         reward.__phase_a_cache__ = {
             'X_num_full': X_num_full,
             'X_cat_full': X_cat_full,
@@ -272,7 +287,7 @@ def make_sa_reward(
             'cat_pos': cat_pos,
             'L_fixed': L_fixed,
             'labels0': labels0,
-            'protos0': protos0,
+            'protos0': protos0,   # tetap disimpan untuk Phase B fallback
             'n_samples': len(df_full),
         }
 
@@ -282,13 +297,12 @@ def make_sa_reward(
     # CABANG 4: lsil_fixed_calibrated  ← UTAMA untuk Mode C
     # ────────────────────────────────────────────────────────────
     elif metric == "lsil_fixed_calibrated":
-        guard_every_eff = guard_every        # dari parameter fungsi
-        ss_max_n_cal_eff = ss_max_n_cal      # dari parameter fungsi
+        guard_every_eff = guard_every
+        ss_max_n_cal_eff = ss_max_n_cal
         reward_subsample_n_eff = min(len(df_full), reward_subsample_n)
-        calibrate_mode_eff = calibrate_mode  # dari parameter fungsi
-        use_cache = use_calib_cache          # dari parameter fungsi
+        calibrate_mode_eff = calibrate_mode
+        use_cache = use_calib_cache
 
-        # Precompute sekali — SAMA persis seperti lsil_fixed
         X_num_full, X_cat_full, num_min_full, num_max_full, _, _, inv_rng_full = \
             prepare_mixed_arrays_no_label(df_full)
 
@@ -299,6 +313,10 @@ def make_sa_reward(
         num_pos = {c: i for i, c in enumerate(num_cols_full)}
         cat_pos = {c: i for i, c in enumerate(cat_cols_full)}
 
+        # ── FIX: subsample_and_propagate_labels tetap dipanggil untuk
+        #    labels0 dan idx_sub (dibutuhkan oleh cluster_aware_landmarks).
+        #    protos0 sudah tidak dipakai di reward, tapi disimpan di cache
+        #    untuk Phase B fallback.
         labels0, protos0, idx_sub, labels_sub = subsample_and_propagate_labels(
             df_full=df_full,
             cat_cols_full=cat_cols_full,
@@ -323,9 +341,6 @@ def make_sa_reward(
             select_landmarks_fn=select_landmarks_cluster_aware
             if 'select_landmarks_cluster_aware' in globals() else None
         )
-
-        # protos0 tidak dipakai lagi — lsil_using_prototypes_gower
-        # langsung pakai L_fixed sebagai referensi klaster
 
         def make_masks_for_subset(cols):
             mnum = np.zeros(X_num_full.shape[1], dtype=bool) \
@@ -354,14 +369,22 @@ def make_sa_reward(
             call_count += 1
             mask_num, mask_cat = make_masks_for_subset(cols)
             try:
-                L = lsil_using_prototypes_gower(
-                    labels0, L_fixed, protos0,
+                # ── FIX KRITIS: hapus protos0, pakai lsil_using_landmarks
+                #    langsung dengan signature yang benar ──
+                L = lsil_using_landmarks(
+                    labels0, L_fixed,
                     X_num_full, X_cat_full, num_min_full, num_max_full,
                     feature_mask_num=mask_num, feature_mask_cat=mask_cat,
                     inv_rng=inv_rng_full,
                     agg_mode=lsil_agg_mode, topk=lsil_topk,
                 )
-            except Exception:
+            except Exception as e:
+                # Debug: print error pertama kali saja
+                if call_count <= 3:
+                    print(f"❌ lsil_fixed_calibrated gagal (call={call_count}): {e}")
+                return -1.0
+
+            if np.isnan(L) or not np.isfinite(L):
                 return -1.0
 
             if (calibrate_mode_eff == "always" and (call_count % guard_every_eff) == 0) or \
@@ -396,12 +419,12 @@ def make_sa_reward(
                     lsil_hist_global.append(float(L))
                     ss_hist_global.append(float(S))
                     if len(lsil_hist_global) >= 5:
-                        X = np.vstack([
+                        X_fit = np.vstack([
                             np.array(lsil_hist_global),
                             np.ones(len(lsil_hist_global))
                         ]).T
                         A_, B_ = np.linalg.lstsq(
-                            X, np.array(ss_hist_global), rcond=None
+                            X_fit, np.array(ss_hist_global), rcond=None
                         )[0]
                         A, B = float(A_), float(B_)
                         if use_cache:
@@ -426,9 +449,6 @@ def make_sa_reward(
         reward.__calibrate_mode__ = calibrate_mode_eff
         reward.__calib_cache_enabled__ = use_cache
 
-        # ── INJECT CACHE untuk Phase B ──
-        # Ini yang memungkinkan Phase B memakai kembali komponen
-        # yang sudah diprecompute di Phase A tanpa hitung ulang
         reward.__phase_a_cache__ = {
             'X_num_full': X_num_full,
             'X_cat_full': X_cat_full,
@@ -441,7 +461,7 @@ def make_sa_reward(
             'cat_pos': cat_pos,
             'L_fixed': L_fixed,
             'labels0': labels0,
-            'protos0': protos0,
+            'protos0': protos0,   # tetap disimpan untuk Phase B fallback
             'n_samples': len(df_full),
         }
 

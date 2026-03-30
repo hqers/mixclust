@@ -38,8 +38,10 @@ from .cluster_adapters import (
 
 try:
     from ..metrics.lsil import lsil_using_prototypes_gower
+    from ..metrics.lsil import lsil_using_landmarks   # ← tambah import langsung
 except Exception:
     lsil_using_prototypes_gower = None
+    lsil_using_landmarks = None
 
 try:
     from ..metrics.silhouette import full_silhouette_gower_subsample
@@ -307,31 +309,31 @@ def _eval_with_phase_a_cache(
     mask_num, mask_cat = cache.make_masks_for_subset(cols)
 
     # ── L-Sil ──
-    # Bangun prototipe baru untuk labels_new (K mungkin berbeda dari labels0)
-    # Tapi tetap gunakan X_num_full + mask (tidak re-Gower)
+    # FIX v2.1: Pakai lsil_using_landmarks langsung — tidak perlu build protos.
+    # landmark_labels diambil dari labels_new[L_fixed] bukan labels0[L_fixed]
+    # agar sesuai dengan K baru yang mungkin berbeda dari Phase A.
     lsil_score = np.nan
     try:
-        protos_new = build_prototypes_by_cluster_gower(
-            labels_new,
-            cache.X_num_full, cache.X_cat_full,
-            cache.num_min_full, cache.num_max_full,
-            per_cluster=1, sample_cap=200,
-            seed=42,
-            feature_mask_num=mask_num,
-            feature_mask_cat=mask_cat,
-            inv_rng=cache.inv_rng_full,
-        )
-        if protos_new and lsil_using_prototypes_gower is not None:
-            lsil_score = float(lsil_using_prototypes_gower(
-                labels_new, cache.L_fixed, protos_new,
-                cache.X_num_full, cache.X_cat_full,
-                cache.num_min_full, cache.num_max_full,
-                feature_mask_num=mask_num,
-                feature_mask_cat=mask_cat,
-                inv_rng=cache.inv_rng_full,
-                agg_mode=lsil_agg_mode,
-                topk=lsil_topk,
-            ))
+        if lsil_using_landmarks is not None:
+            # Re-assign landmark labels berdasarkan labels_new (K bisa beda dari Phase A)
+            lm_labels_new = labels_new[cache.L_fixed]
+            n_unique_lm = len(np.unique(lm_labels_new))
+            if n_unique_lm >= 2:
+                from ..metrics.lsil import compute_lsil_from_D
+                from ..core.gower import gower_distances_to_landmarks
+                D = gower_distances_to_landmarks(
+                    cache.X_num_full, cache.X_cat_full,
+                    cache.num_min_full, cache.num_max_full,
+                    cache.L_fixed,
+                    feature_mask_num=mask_num,
+                    feature_mask_cat=mask_cat,
+                    inv_rng=cache.inv_rng_full,
+                )
+                score_val, _ = compute_lsil_from_D(
+                    D, labels_new, lm_labels_new,
+                    agg_mode=lsil_agg_mode, topk=lsil_topk,
+                )
+                lsil_score = float(score_val)
     except Exception:
         pass
 
@@ -400,7 +402,7 @@ def score_internal(
         )
         return float(ss)
 
-    if _lsil is None:
+    if _lsil is None and lsil_using_landmarks is None:
         raise RuntimeError("L-Sil not available.")
 
     X_num, X_cat, num_min, num_max, mask_num, mask_cat, inv_rng = \
@@ -410,18 +412,25 @@ def score_internal(
         X_unit = normalize(X_num, norm="l2")
         landmark_idx = select_landmarks_kcenter(X_unit, m=m, seed=random_state)
     else:
-        landmark_idx = list(range(min(m, n)))
-    prototypes = build_prototypes_by_cluster_gower(
-        labels, X_num, X_cat, num_min, num_max,
-        per_cluster=1, sample_cap=200, seed=random_state,
-        feature_mask_num=mask_num, feature_mask_cat=mask_cat, inv_rng=inv_rng
-    )
-    score = _lsil(
-        labels, landmark_idx, prototypes,
-        X_num, X_cat, num_min, num_max,
-        feature_mask_num=mask_num, feature_mask_cat=mask_cat,
-        inv_rng=inv_rng, agg_mode="topk", topk=1
-    )
+        landmark_idx = np.arange(min(m, n), dtype=int)
+
+    # FIX v2.1: pakai lsil_using_landmarks (bukan lsil_using_prototypes_gower)
+    # — tidak perlu build_prototypes, landmark langsung jadi referensi klaster
+    if lsil_using_landmarks is not None:
+        score = lsil_using_landmarks(
+            labels, landmark_idx,
+            X_num, X_cat, num_min, num_max,
+            feature_mask_num=mask_num, feature_mask_cat=mask_cat,
+            inv_rng=inv_rng, agg_mode="topk", topk=1
+        )
+    else:
+        # Fallback ke wrapper lama (signature sudah kompatibel)
+        score = _lsil(
+            labels, landmark_idx,
+            X_num, X_cat, num_min, num_max,
+            feature_mask_num=mask_num, feature_mask_cat=mask_cat,
+            inv_rng=inv_rng, agg_mode="topk", topk=1
+        )
     return float(score)
 
 
