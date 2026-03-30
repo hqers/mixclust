@@ -146,6 +146,11 @@ class AUFSParams:
     lsil_c: float = 3.0            # |L|=c*sqrt(n), Theorem 1 JDSA
     lsil_cap_frac: float = 0.2     # batas atas landmark fraction
 
+    # Reward v2.2 — parameter baru untuk percepatan build_reward & SA reward
+    lsil_eval_n: int = 20_000           # [A] n untuk evaluasi per reward call
+    lsil_c_reward: Optional[float] = None  # [A] c untuk landmark eval (None=pakai lsil_c)
+    subsample_n_cluster: int = 6_000    # [B] n untuk initial clustering
+
     # Clustering
     n_clusters: int = 5
     engine_mode: str = "C"
@@ -344,6 +349,10 @@ def run_aufs_samba(
         reward_subsample_n=params.reward_subsample_n,
         calibrate_mode=params.calibrate_mode,
         use_calib_cache=params.calib_cache_enabled,
+        # v2.2 — percepatan build_reward & SA reward
+        lsil_eval_n=params.lsil_eval_n,
+        lsil_c_reward=params.lsil_c_reward,
+        subsample_n_cluster=params.subsample_n_cluster,
     )
     timing["build_reward_s"] = perf_counter() - t0
     if verbose:
@@ -695,6 +704,10 @@ def find_best_feature_subsets(
         lsil_c=params.lsil_c,
         lsil_cap_frac=params.lsil_cap_frac,
         random_state=params.random_state,
+        # v2.2 — percepatan build_reward & SA reward
+        lsil_eval_n=params.lsil_eval_n,
+        lsil_c_reward=params.lsil_c_reward,
+        subsample_n_cluster=params.subsample_n_cluster,
     )
 
     reward_for_mab = make_mab_reward_from_matrix(red_mat)

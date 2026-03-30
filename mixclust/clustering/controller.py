@@ -32,6 +32,7 @@ from sklearn.metrics import calinski_harabasz_score as _chi
 from .cluster_adapters import (
     hac_gower_adapter,
     kprototypes_adapter,
+    kprototypes_subsample_adapter,   # ← FIX v1.1.5: was missing, caused silent NameError
     kmodes_adapter,
     auto_adapter,
 )

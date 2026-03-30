@@ -1,6 +1,6 @@
 [project]
 name = "mixclust"
-version = "1.1.4"
+version = "1.1.5"
 description = "Adaptive mixed-type clustering with AUFS-Samba, L-Sil, LNC*, and dynamic controller"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -42,31 +42,3 @@ exclude = ["tests*", "notebooks*", "*.egg-info"]
 
 [tool.setuptools.package-data]
 mixclust = ["py.typed"]
-
-# ── Changelog ─────────────────────────────────────────────────────
-# v1.1.1 (2026-03-30)
-#   BUG FIX — reward.py (cabang lsil_fixed & lsil_fixed_calibrated):
-#     Setelah refactor L-Sil ke landmark-based, pemanggilan
-#     lsil_using_prototypes_gower masih menyertakan protos0 di posisi
-#     argumen X_num → TypeError ditangkap secara silent → SA reward = -1.0
-#     setiap iterasi. Fix: semua cabang kini memanggil lsil_using_landmarks
-#     langsung tanpa protos0.
-#
-#   BUG FIX — controller.py (_eval_with_phase_a_cache):
-#     build_prototypes_by_cluster_gower + lsil_using_prototypes_gower lama
-#     diganti dengan compute_lsil_from_D + gower_distances_to_landmarks.
-#     landmark_labels kini diambil dari labels_new[L_fixed] bukan
-#     labels0[L_fixed] sehingga konsisten dengan K Phase B yang bisa berbeda.
-#
-#   BUG FIX — controller.py (score_internal):
-#     Hapus build_prototypes_by_cluster_gower, gunakan lsil_using_landmarks.
-#
-#   PERF — redundancy.py:
-#     Tambah _overlap_k_neighbors_vectorized(): semantik identik dengan
-#     implementasi lama tapi O(U1*U2*k + n) vs O(n) Python loop.
-#     Speedup ~600x untuk n=50k. Aktif otomatis untuk n >= 5000.
-#     Tambah timeout=300 per joblib worker dan fallback sequential otomatis.
-#
-#   API — __init__.py:
-#     Tambah ekspor lsil_using_landmarks sebagai public API utama.
-#     lsil_using_prototypes_gower tetap diekspor sebagai backward-compat alias.
