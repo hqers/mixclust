@@ -32,7 +32,7 @@ from sklearn.metrics import calinski_harabasz_score as _chi
 from .cluster_adapters import (
     hac_gower_adapter,
     kprototypes_adapter,
-    kprototypes_subsample_adapter,   # ← FIX v1.1.5: was missing, caused silent NameError
+    kprototypes_subsample_adapter,   # FIX v1.1.5
     kmodes_adapter,
     auto_adapter,
 )
@@ -294,53 +294,63 @@ def _eval_with_phase_a_cache(
     Evaluasi (L-Sil, LNC*) untuk subset kolom `cols` dengan label baru
     `labels_new`, menggunakan kembali precomputed cache dari Phase A.
 
-    KUNCI EFISIENSI:
-    - Tidak re-compute Gower arrays → pakai X_num_full + mask
-    - Tidak re-select landmarks → pakai L_fixed yang sama
-    - Tidak re-build prototypes untuk L-Sil → pakai protos0
-      TAPI: rebuild protos untuk labels_new (karena K bisa berbeda)
-    - Kompleksitas per call: O(n·|L|) bukan O(n²)
+    v1.1.6: L-Sil dievaluasi pada Phase B subsample (~30k rows) jika tersedia.
+    Speedup ~11x untuk n=334k (96s→9s per trial).
 
     Returns: (lsil_score, lnc_score)
     """
     if not cache.available:
         return np.nan, np.nan
 
-    # Buat mask untuk subset ini — O(|cols|), microseconds
     mask_num, mask_cat = cache.make_masks_for_subset(cols)
 
     # ── L-Sil ──
-    # FIX v2.1: Pakai lsil_using_landmarks langsung — tidak perlu build protos.
-    # landmark_labels diambil dari labels_new[L_fixed] bukan labels0[L_fixed]
-    # agar sesuai dengan K baru yang mungkin berbeda dari Phase A.
     lsil_score = np.nan
     try:
         if lsil_using_landmarks is not None:
-            # Re-assign landmark labels berdasarkan labels_new (K bisa beda dari Phase A)
-            lm_labels_new = labels_new[cache.L_fixed]
-            n_unique_lm = len(np.unique(lm_labels_new))
-            if n_unique_lm >= 2:
-                from ..metrics.lsil import compute_lsil_from_D
-                from ..core.gower import gower_distances_to_landmarks
-                D = gower_distances_to_landmarks(
-                    cache.X_num_full, cache.X_cat_full,
-                    cache.num_min_full, cache.num_max_full,
-                    cache.L_fixed,
-                    feature_mask_num=mask_num,
-                    feature_mask_cat=mask_cat,
-                    inv_rng=cache.inv_rng_full,
-                )
-                score_val, _ = compute_lsil_from_D(
-                    D, labels_new, lm_labels_new,
-                    agg_mode=lsil_agg_mode, topk=lsil_topk,
-                )
-                lsil_score = float(score_val)
+            from ..metrics.lsil import compute_lsil_from_D
+            from ..core.gower import gower_distances_to_landmarks
+
+            # Pilih jalur: subsample Phase B (cepat) atau full (fallback)
+            if cache._pb_available:
+                # JALUR CEPAT: evaluasi pada ~30k rows
+                labels_pb = labels_new[cache._pb_idx]
+                lm_labels_pb = labels_pb[cache._pb_L]
+                if len(np.unique(lm_labels_pb)) >= 2:
+                    D = gower_distances_to_landmarks(
+                        cache._pb_X_num, cache._pb_X_cat,
+                        cache._pb_num_min, cache._pb_num_max,
+                        cache._pb_L,
+                        feature_mask_num=mask_num,
+                        feature_mask_cat=mask_cat,
+                        inv_rng=cache._pb_inv_rng,
+                    )
+                    score_val, _ = compute_lsil_from_D(
+                        D, labels_pb, lm_labels_pb,
+                        agg_mode=lsil_agg_mode, topk=lsil_topk,
+                    )
+                    lsil_score = float(score_val)
+            else:
+                # FALLBACK: full data
+                lm_labels_new = labels_new[cache.L_fixed]
+                if len(np.unique(lm_labels_new)) >= 2:
+                    D = gower_distances_to_landmarks(
+                        cache.X_num_full, cache.X_cat_full,
+                        cache.num_min_full, cache.num_max_full,
+                        cache.L_fixed,
+                        feature_mask_num=mask_num,
+                        feature_mask_cat=mask_cat,
+                        inv_rng=cache.inv_rng_full,
+                    )
+                    score_val, _ = compute_lsil_from_D(
+                        D, labels_new, lm_labels_new,
+                        agg_mode=lsil_agg_mode, topk=lsil_topk,
+                    )
+                    lsil_score = float(score_val)
     except Exception:
         pass
 
-    # ── LNC* ──
-    # KUNCI FIX: pakai knn_index yang sudah diprebuilt di PhaseACache
-    # BUKAN bangun KNNIndex baru setiap trial — itu yang menyebabkan lambat
+    # ── LNC* ── (tetap pada full data — sudah prebuilt KNNIndex)
     lnc_score = np.nan
     try:
         if (lnc_star is not None

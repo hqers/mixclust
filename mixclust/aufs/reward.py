@@ -387,6 +387,7 @@ def make_sa_reward(
             'num_pos': num_pos, 'cat_pos': cat_pos,
             'L_fixed': L_fixed_full, 'labels0': labels0,
             'protos0': protos0, 'n_samples': n_full,
+            'random_state': random_state,
         }
         return reward
 
@@ -574,6 +575,7 @@ def make_sa_reward(
             'labels0':       labels0,
             'protos0':       protos0,
             'n_samples':     n_full,
+            'random_state':  random_state,   # v1.1.6: untuk Phase B subsample
         }
 
         return reward

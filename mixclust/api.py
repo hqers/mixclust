@@ -146,7 +146,7 @@ class AUFSParams:
     lsil_c: float = 3.0            # |L|=c*sqrt(n), Theorem 1 JDSA
     lsil_cap_frac: float = 0.2     # batas atas landmark fraction
 
-    # Reward v2.2 — parameter baru untuk percepatan build_reward & SA reward
+    # Reward v2.2 — parameter percepatan build_reward & SA reward
     lsil_eval_n: int = 20_000           # [A] n untuk evaluasi per reward call
     lsil_c_reward: Optional[float] = None  # [A] c untuk landmark eval (None=pakai lsil_c)
     subsample_n_cluster: int = 6_000    # [B] n untuk initial clustering
@@ -158,6 +158,7 @@ class AUFSParams:
     auto_algorithms: Optional[List[str]] = None
     c_min: int = 2
     c_max: int = 8
+    phase_b_eval_n: int = 30_000      # subsample untuk evaluasi L-Sil di Phase B
 
     # Redundancy
     kmsnc_k: int = 5
@@ -343,13 +344,12 @@ def run_aufs_samba(
         lsil_cap_frac=params.lsil_cap_frac,
         random_state=params.random_state,
         dynamic_k=False,
-        # field kalibrasi dari params (alias lama tetap kompatibel)
         guard_every=params.guard_every_calib,
         ss_max_n_cal=params.ss_max_n_cal,
         reward_subsample_n=params.reward_subsample_n,
         calibrate_mode=params.calibrate_mode,
         use_calib_cache=params.calib_cache_enabled,
-        # v2.2 — percepatan build_reward & SA reward
+        # v2.2 — percepatan
         lsil_eval_n=params.lsil_eval_n,
         lsil_c_reward=params.lsil_c_reward,
         subsample_n_cluster=params.subsample_n_cluster,
@@ -440,7 +440,10 @@ def run_aufs_samba(
     # Kita ekstrak cache ini SETELAH SA selesai (Phase A done),
     # lalu teruskan ke Phase B.
     # ────────────────────────────────────────────────────────────────────
-    phase_a_cache = _extract_phase_a_cache(reward_sa, df)
+    phase_a_cache = _extract_phase_a_cache(
+        reward_sa, df,
+        phase_b_eval_n=getattr(params, 'phase_b_eval_n', 30_000),
+    )
 
     if verbose:
         if phase_a_cache.available:
@@ -704,7 +707,7 @@ def find_best_feature_subsets(
         lsil_c=params.lsil_c,
         lsil_cap_frac=params.lsil_cap_frac,
         random_state=params.random_state,
-        # v2.2 — percepatan build_reward & SA reward
+        # v2.2 — percepatan
         lsil_eval_n=params.lsil_eval_n,
         lsil_c_reward=params.lsil_c_reward,
         subsample_n_cluster=params.subsample_n_cluster,
