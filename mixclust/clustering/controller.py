@@ -289,13 +289,14 @@ def _eval_with_phase_a_cache(
     lsil_topk: int = 1,
     lnc_k: int = 20,
     lnc_alpha: float = 0.7,
+    skip_lnc: bool = False,
 ) -> Tuple[float, float]:
     """
-    Evaluasi (L-Sil, LNC*) untuk subset kolom `cols` dengan label baru
-    `labels_new`, menggunakan kembali precomputed cache dari Phase A.
+    Evaluasi (L-Sil, LNC*) untuk subset kolom `cols` dengan label baru.
 
-    v1.1.6: L-Sil dievaluasi pada Phase B subsample (~30k rows) jika tersedia.
-    Speedup ~11x untuk n=334k (96s→9s per trial).
+    v1.1.7:
+    - L-Sil pada Phase B subsample (~30k) jika tersedia → ~2s vs ~20s
+    - skip_lnc=True → LNC*=NaN, hemat ~30s per trial
 
     Returns: (lsil_score, lnc_score)
     """
@@ -311,9 +312,8 @@ def _eval_with_phase_a_cache(
             from ..metrics.lsil import compute_lsil_from_D
             from ..core.gower import gower_distances_to_landmarks
 
-            # Pilih jalur: subsample Phase B (cepat) atau full (fallback)
             if cache._pb_available:
-                # JALUR CEPAT: evaluasi pada ~30k rows
+                # JALUR CEPAT: subsample Phase B (~30k rows)
                 labels_pb = labels_new[cache._pb_idx]
                 lm_labels_pb = labels_pb[cache._pb_L]
                 if len(np.unique(lm_labels_pb)) >= 2:
@@ -350,28 +350,29 @@ def _eval_with_phase_a_cache(
     except Exception:
         pass
 
-    # ── LNC* ── (tetap pada full data — sudah prebuilt KNNIndex)
+    # ── LNC* ──
     lnc_score = np.nan
-    try:
-        if (lnc_star is not None
-                and cache.knn_index is not None
-                and cache.X_unit_full is not None):
-            n = cache.n_samples
-            M_cand = min(max(3 * lnc_k, 100), max(50, int(0.05 * n)))
-            lnc_score = float(lnc_star(
-                cache.X_unit_full, labels_new, cache.L_fixed, cache.knn_index,
-                k=lnc_k, alpha=lnc_alpha,
-                X_num=cache.X_num_full,
-                X_cat=cache.X_cat_full,
-                num_min=cache.num_min_full,
-                num_max=cache.num_max_full,
-                feature_mask_num=mask_num,
-                feature_mask_cat=mask_cat,
-                inv_rng=cache.inv_rng_full,
-                M_candidates=M_cand,
-            ))
-    except Exception:
-        pass
+    if not skip_lnc:
+        try:
+            if (lnc_star is not None
+                    and cache.knn_index is not None
+                    and cache.X_unit_full is not None):
+                n = cache.n_samples
+                M_cand = min(max(3 * lnc_k, 100), max(50, int(0.05 * n)))
+                lnc_score = float(lnc_star(
+                    cache.X_unit_full, labels_new, cache.L_fixed, cache.knn_index,
+                    k=lnc_k, alpha=lnc_alpha,
+                    X_num=cache.X_num_full,
+                    X_cat=cache.X_cat_full,
+                    num_min=cache.num_min_full,
+                    num_max=cache.num_max_full,
+                    feature_mask_num=mask_num,
+                    feature_mask_cat=mask_cat,
+                    inv_rng=cache.inv_rng_full,
+                    M_candidates=M_cand,
+                ))
+        except Exception:
+            pass
 
     return lsil_score, lnc_score
 
@@ -455,7 +456,7 @@ def auto_select_algo_k(
     algorithms: List[str],
     c_range: range,
     *,
-    phase_a_cache: Optional[PhaseACache] = None,   # ← KUNCI BARU
+    phase_a_cache: Optional[PhaseACache] = None,
     primary_metric: str = "auto",
     lambda_weight: float = 0.6,
     penalty_lambda: float = 0.02,
@@ -470,6 +471,7 @@ def auto_select_algo_k(
     screening_k_values: Tuple[int, ...] = (2, 3, 4),
     screening_prune_threshold: float = 0.15,
     random_state: int = 42,
+    skip_lnc: bool = False,          # v1.1.7: skip LNC* per trial
 ) -> Dict[str, Any]:
     """
     Phase B: Cari (algorithm, K) terbaik menggunakan composite score J(algo).
@@ -537,6 +539,7 @@ def auto_select_algo_k(
                 lsil_topk=lsil_topk,
                 lnc_k=lnc_k,
                 lnc_alpha=lnc_alpha,
+                skip_lnc=skip_lnc,
             )
         else:
             # JALUR FALLBACK: score dari scratch
@@ -814,14 +817,16 @@ def find_best_clustering_from_subsets(
                 cat_idx=cat_idx_subset,
                 algorithms=algorithms,
                 c_range=c_range,
-                phase_a_cache=phase_a_cache,   # ← teruskan cache
+                phase_a_cache=phase_a_cache,
                 hac_mode=hac_mode,
                 lambda_weight=lambda_weight,
                 lnc_k=getattr(params, 'lnc_k', 20),
                 lnc_alpha=getattr(params, 'lnc_alpha', 0.7),
+                lsil_topk=getattr(params, 'lsil_topk', 3),
                 enable_screening=getattr(params, 'enable_screening', True),
                 screening_k_values=getattr(params, 'screening_k_values', (2, 3, 4)),
                 random_state=params.random_state,
+                skip_lnc=getattr(params, 'phase_b_skip_lnc', False),
             )
 
         current["subset"] = subset

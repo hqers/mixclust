@@ -571,11 +571,11 @@ def make_sa_reward(
             'inv_rng_full':  inv_rng_full,
             'num_pos':       num_pos,
             'cat_pos':       cat_pos,
-            'L_fixed':       L_fixed_full,   # full-data landmark untuk Phase B
+            'L_fixed':       L_fixed_full,
             'labels0':       labels0,
             'protos0':       protos0,
             'n_samples':     n_full,
-            'random_state':  random_state,   # v1.1.6: untuk Phase B subsample
+            'random_state':  random_state,
         }
 
         return reward
