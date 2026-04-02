@@ -15,7 +15,7 @@ Paper:
     AUFS-Samba: https://doi.org/10.1109/ACCESS.2026.3653624
 """
 
-__version__ = "1.1.7"
+__version__ = "1.1.8"
 __author__  = "Hasta Pratama"
 __email__   = "33220015@std.stei.itb.ac.id"
 

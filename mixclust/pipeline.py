@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 
 from .api import run_aufs_samba, AUFSParams
+from .utils.dqc import run_dqc
 from .reporting.profiles import build_profiles_table
 from .clustering.cluster_profiling import profile_clusters
 
@@ -65,6 +66,23 @@ def run_generic_end2end(
         columns=[c for c in drops if c in df_ready.columns],
         errors="ignore"
     ).copy()
+
+    # ── Data Quality Check — sebelum AUFS-Samba ─────────────────────────
+    # Deteksi dan drop fitur zero-variance / near-zero sebelum masuk ke
+    # reward landscape AUFS-Samba. Fitur seperti ini tidak terdeteksi oleh
+    # reward karena tidak menurunkan L-Sil, tapi mengecilkan bobot fitur
+    # lain via normalisasi Gower /p (contoh: AccessCommunication Susenas).
+    feat_df, _dqc_dropped, _dqc_report = run_dqc(
+        feat_df,
+        zero_var_action="drop",
+        near_zero_action="drop",
+        near_zero_threshold=0.998,
+        missing_action="warn",
+        missing_threshold=0.5,
+        verbose=verbose,
+    )
+    if _dqc_dropped:
+        drops.update(_dqc_dropped)
 
     params = params or AUFSParams(
         engine_mode="C",
@@ -125,6 +143,9 @@ def run_generic_end2end(
         verbose=verbose,
         return_info=True
     )
+
+    # Simpan DQC report
+    _dqc_report.to_csv(os.path.join(outdir, "dqc_report.csv"), index=False)
 
     # Simpan config & features
     with open(os.path.join(outdir, "config.json"), "w", encoding="utf-8") as f:

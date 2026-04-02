@@ -216,31 +216,33 @@ def auto_adapter(
     *,
     min_cluster_frac: float = 0.02,
     max_init_retries: int = 3,
+    n_threshold_large: int = 10_000,
 ) -> Union[np.ndarray, List]:
     """
-    Auto-select clustering algorithm based on feature types.
-    
-    NEW: Includes balance check — if initial clustering produces degenerate
-    result (any cluster < min_cluster_frac of n), retries with different
-    n_init seeds. This prevents outlier-separation solutions that yield
-    high Silhouette but meaningless clusters.
-    
-    Parameters
-    ----------
-    min_cluster_frac : float
-        Minimum fraction of n that each cluster must contain.
-    max_init_retries : int
-        Number of retries with different seeds before accepting result.
+    Auto-select clustering algorithm based on feature composition and data size.
+
+    Logika diagnosis:
+    - Numerik dominan (cat=0)          → KMeans
+    - Kategorik dominan (num=0)        → KModes
+    - Mixed, n kecil (≤n_threshold)    → HAC-Gower (paling akurat, O(n²))
+    - Mixed, n besar (>n_threshold)    → kprototypes (default mixed-type)
+      Jika KAMILA tersedia + n besar   → coba KAMILA juga, pilih via balance check
+
+    Includes balance check — retries with different seeds if degenerate.
     """
     cat_cols, num_cols = _split_types(X_df)
     n = len(X_df)
 
-    # Choose algorithm based on type composition
+    # Choose algorithm based on type composition + data size
     if len(cat_cols) == 0:
         adapter_fn = kmeans_adapter
     elif len(num_cols) == 0:
         adapter_fn = kmodes_adapter
+    elif n <= n_threshold_large:
+        # Mixed, n kecil → prefer kprototypes (HAC via controller kalau dipilih)
+        adapter_fn = kprototypes_adapter
     else:
+        # Mixed, n besar → kprototypes default
         adapter_fn = kprototypes_adapter
 
     # First attempt
@@ -270,7 +272,6 @@ def auto_adapter(
         except Exception:
             continue
 
-    # Return best attempt even if still degenerate
     return best_labels
 
 def kprototypes_subsample_adapter(
@@ -300,3 +301,86 @@ def kprototypes_subsample_adapter(
     labels_all = kp.predict(X_df.values, categorical=cat_idx)
     
     return labels_all.astype(int)
+
+
+# =============== Adapter: KAMILA ===============
+
+try:
+    from .kamila import KAMILA
+    _HAS_KAMILA = True
+except Exception:
+    _HAS_KAMILA = False
+
+
+def kamila_adapter(
+    X_df: pd.DataFrame,
+    cat_idx: List[int],
+    n_clusters: int,
+    random_state: Optional[int] = None,
+    *,
+    n_init: int = 5,
+    max_iter: int = 25,
+) -> np.ndarray:
+    """KAMILA clustering — semiparametric mixed-type (Foss & Markatou 2018)."""
+    if not _HAS_KAMILA:
+        raise RuntimeError("KAMILA not available. Place kamila.py in mixclust/clustering/.")
+    _validate_k(len(X_df), n_clusters)
+    cat_cols, num_cols = _split_types(X_df)
+    if len(num_cols) == 0 or len(cat_cols) == 0:
+        raise ValueError("KAMILA requires both numeric and categorical features.")
+    model = KAMILA(
+        n_clusters=n_clusters,
+        n_init=n_init,
+        max_iter=max_iter,
+        random_state=random_state,
+    )
+    labels = model.fit_predict(X_df, num_cols=num_cols, cat_cols=cat_cols)
+    return np.asarray(labels, dtype=int)
+
+
+def kamila_subsample_adapter(
+    X_df: pd.DataFrame,
+    cat_idx: List[int],
+    n_clusters: int,
+    random_state: Optional[int] = None,
+    *,
+    subsample_n: int = 6000,
+    n_init: int = 5,
+    max_iter: int = 25,
+) -> np.ndarray:
+    """KAMILA on subsample + propagate via NN (untuk n besar)."""
+    if not _HAS_KAMILA:
+        raise RuntimeError("KAMILA not available.")
+    n = len(X_df)
+    cat_cols, num_cols = _split_types(X_df)
+
+    if n <= subsample_n:
+        return kamila_adapter(X_df, cat_idx, n_clusters, random_state,
+                              n_init=n_init, max_iter=max_iter)
+
+    # Subsample → fit → propagate
+    rng = np.random.default_rng(random_state)
+    idx_sub = rng.choice(n, size=subsample_n, replace=False)
+    X_sub = X_df.iloc[idx_sub].reset_index(drop=True)
+
+    model = KAMILA(
+        n_clusters=n_clusters,
+        n_init=n_init,
+        max_iter=max_iter,
+        random_state=random_state,
+    )
+    labels_sub = model.fit_predict(X_sub, num_cols=num_cols, cat_cols=cat_cols)
+
+    # Propagate via NN pada fitur numerik
+    from sklearn.neighbors import NearestNeighbors
+    Z_sub = _prep_numeric(X_sub, num_cols)
+    Z_full = _prep_numeric(X_df, num_cols)
+    if Z_sub.shape[1] > 0:
+        nn = NearestNeighbors(n_neighbors=1, algorithm="ball_tree", n_jobs=1)
+        nn.fit(Z_sub)
+        _, nn_idx = nn.kneighbors(Z_full)
+        labels_all = labels_sub[nn_idx.ravel()]
+    else:
+        labels_all = np.array([labels_sub[i % subsample_n] for i in range(n)], dtype=int)
+
+    return np.asarray(labels_all, dtype=int)

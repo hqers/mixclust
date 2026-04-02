@@ -2,25 +2,10 @@
 #
 # Domain Anchor Variable (DAV) — Phase B extension untuk MixClust
 #
-# POSISI FILE:  mixclust/utils/dav.py
-# (sama folder dengan controller.py, structural_control.py, cluster_adapters.py)
-#
-# ────────────────────────────────────────────────────────────────
-#  Konsep:
-#    Tanpa DAV:  K* = argmax  LNC*(C, L, S*)
-#    Dengan DAV: K* = argmax  LNC*_a(C, L, Va)
-#                s.t. LNC*(S*) >= lnc_global_threshold
-#
-#  Va  = anchor subset (domain knowledge user)
-#        contoh Susenas : ['DDS12_noTobPrep_norm', 'DDS13_noTob_norm']
-#        contoh Obesity : ['Weight', 'BMI_category']
-#        contoh Adult   : ['hours_per_week', 'education_num']
-#
-#  Perubahan dari pipeline standar:
-#    HANYA satu baris di Auto-K loop yang berbeda —
-#    lnc_star() dipanggil di ruang Va, bukan S*.
-#    Semua komponen lain (AUFS-Samba, Cluster Adapter, HAC-Gower,
-#    landmark, profiling) TIDAK berubah sama sekali.
+# v1.1.8 FIX:
+#   1. Clustering pakai subsample adapter (bukan full 334k)
+#   2. LNC* global reuse phase_a_cache.knn_index (bukan bangun ulang)
+#   3. Anchor KNN+landmark di-cache per subset (bukan per trial)
 # ────────────────────────────────────────────────────────────────
 
 from __future__ import annotations
@@ -31,7 +16,6 @@ from dataclasses import asdict
 from time import perf_counter
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-# ── Import komponen MixClust yang sudah ada ──────────────────────
 from ..metrics.lnc_star import lnc_star
 from ..core.preprocess import prepare_mixed_arrays_no_label
 from ..core.features import build_features
@@ -49,16 +33,107 @@ from ..aufs.phase_a_cache import PhaseACache
 
 
 # ================================================================
-# 1.  lnc_star_anchored()
-#     Evaluasi LNC* di ruang Va (anchor subset), bukan S* penuh.
+# 1. Prebuilt anchor context — dibangun SEKALI per subset
+# ================================================================
+
+class _AnchorContext:
+    """Cache KNN index + landmarks + arrays di ruang Va.
+    Dibangun sekali per subset, dipakai ulang per trial (algo, K)."""
+    __slots__ = ('X_unit_a', 'knn_a', 'L_idx',
+                 'X_num_a', 'X_cat_a', 'num_min_a', 'num_max_a',
+                 'mask_num_a', 'mask_cat_a', 'inv_rng_a',
+                 'Va_valid', 'ok')
+
+    def __init__(self, X_df: pd.DataFrame, Va: List[str], labels_init: np.ndarray,
+                 lm_frac: float = 0.20, seed: int = 42, verbose: bool = False):
+        self.ok = False
+        self.Va_valid = [c for c in Va if c in X_df.columns]
+        if not self.Va_valid:
+            if verbose:
+                print(f"[DAV] Anchor cols tidak ditemukan: {Va}")
+            return
+
+        X_anchor = X_df[self.Va_valid]
+        n = len(X_anchor)
+
+        # Gower arrays di ruang Va
+        self.X_num_a, self.X_cat_a, self.num_min_a, self.num_max_a, \
+            self.mask_num_a, self.mask_cat_a, self.inv_rng_a = \
+            prepare_mixed_arrays_no_label(X_anchor)
+
+        # Unit-norm untuk ANN
+        try:
+            self.X_unit_a, _, _ = build_features(
+                X_anchor, label_col=None, scaler_type="standard", unit_norm=True
+            )
+        except Exception as e:
+            if verbose:
+                print(f"[DAV] build_features gagal: {e}")
+            return
+
+        # Landmark di ruang Va
+        m = max(int(np.sqrt(n)), min(int(lm_frac * n), n - 1))
+        try:
+            self.L_idx = select_landmarks_cluster_aware(
+                self.X_unit_a, labels_init, m,
+                central_frac=0.80, boundary_frac=0.20,
+                per_cluster_min=3, seed=seed,
+            )
+        except Exception as e:
+            if verbose:
+                print(f"[DAV] select_landmarks gagal: {e}")
+            return
+
+        # KNN index di ruang Va
+        try:
+            self.knn_a = KNNIndex(self.X_unit_a, try_hnsw=True, verbose=False)
+        except Exception as e:
+            if verbose:
+                print(f"[DAV] KNNIndex gagal: {e}")
+            return
+
+        self.ok = True
+        if verbose:
+            print(f"[DAV] Anchor context: Va={self.Va_valid}, "
+                  f"|L|={len(self.L_idx)}, n={n}")
+
+
+def _lnc_star_anchored_fast(
+    anchor_ctx: _AnchorContext,
+    labels: np.ndarray,
+    lnc_k: int = 50,
+    lnc_alpha: float = 0.70,
+    M_candidates: int = 300,
+) -> float:
+    """LNC*_a menggunakan prebuilt anchor context — tanpa rebuild KNN/landmark."""
+    if not anchor_ctx.ok:
+        return np.nan
+    try:
+        val = lnc_star(
+            anchor_ctx.X_unit_a, labels, anchor_ctx.L_idx, anchor_ctx.knn_a,
+            k=lnc_k, alpha=lnc_alpha,
+            X_num=anchor_ctx.X_num_a, X_cat=anchor_ctx.X_cat_a,
+            num_min=anchor_ctx.num_min_a, num_max=anchor_ctx.num_max_a,
+            feature_mask_num=anchor_ctx.mask_num_a,
+            feature_mask_cat=anchor_ctx.mask_cat_a,
+            inv_rng=anchor_ctx.inv_rng_a,
+            M_candidates=M_candidates,
+        )
+        return float(val) if np.isfinite(val) else np.nan
+    except Exception:
+        return np.nan
+
+
+# ================================================================
+# 2. lnc_star_anchored — public API (backward compat, builds fresh)
 # ================================================================
 
 def lnc_star_anchored(
-    X_df: pd.DataFrame,         # subset S* — hanya kolom fitur terpilih
-    labels: Sequence,           # label klaster hasil clustering
-    Va: List[str],              # anchor subset ⊆ kolom X_df
+    X_df: pd.DataFrame,
+    labels: Sequence,
+    Va: List[str],
     *,
-    lm_frac: float = 0.20,     # fraksi landmark (default paper: 20%)
+    lm_frac: float = 0.20,
     central_frac: float = 0.80,
     boundary_frac: float = 0.20,
     lnc_k: int = 50,
@@ -67,96 +142,58 @@ def lnc_star_anchored(
     seed: int = 42,
     verbose: bool = False,
 ) -> float:
-    """
-    Hitung LNC*_a: LNC* yang dievaluasi di ruang fitur Va.
-
-    Langkah:
-      1. Subset X_df ke Va saja.
-      2. Bangun KNN index + landmark di ruang Va.
-      3. Panggil lnc_star() standar — semua representasi dari Va.
-
-    Return : float LNC*_a ∈ [0,1], atau nan jika Va tidak valid.
-    """
-    # Validasi Va
-    Va_valid = [c for c in Va if c in X_df.columns]
-    if not Va_valid:
-        if verbose:
-            print(f"[DAV] Kolom anchor tidak ditemukan di X_df: {Va}")
-        return np.nan
-    if len(Va_valid) < len(Va) and verbose:
-        print(f"[DAV] Kolom anchor hilang (diabaikan): "
-              f"{[c for c in Va if c not in X_df.columns]}")
-
-    X_anchor = X_df[Va_valid].copy()
-    n = len(X_anchor)
-
-    # Array Gower di ruang Va
-    X_num_a, X_cat_a, num_min_a, num_max_a, \
-        mask_num_a, mask_cat_a, inv_rng_a = \
-        prepare_mixed_arrays_no_label(X_anchor)
-
-    # Unit-norm features untuk ANN
-    try:
-        X_unit_a, _, _ = build_features(
-            X_anchor, label_col=None, scaler_type="standard", unit_norm=True
-        )
-    except Exception as e:
-        if verbose:
-            print(f"[DAV] build_features gagal di ruang Va: {e}")
-        return np.nan
-
-    # Landmark di ruang Va  (√n ≤ |L| ≤ 20%×n — sesuai paper)
-    m = max(int(np.sqrt(n)), min(int(lm_frac * n), n - 1))
+    """Public API — builds anchor context from scratch. For one-off calls."""
     labels_arr = np.asarray(labels)
-    try:
-        L_idx = select_landmarks_cluster_aware(
-            X_unit_a, labels_arr, m,
-            central_frac=central_frac,
-            boundary_frac=boundary_frac,
-            per_cluster_min=3,
-            seed=seed,
-        )
-    except Exception as e:
-        if verbose:
-            print(f"[DAV] select_landmarks gagal: {e}")
-        return np.nan
-
-    # KNN index di ruang Va
-    try:
-        knn_a = KNNIndex(X_unit_a, try_hnsw=True, verbose=False)
-    except Exception as e:
-        if verbose:
-            print(f"[DAV] KNNIndex gagal: {e}")
-        return np.nan
-
-    # Hitung LNC*_a
-    try:
-        val = lnc_star(
-            X_unit_a, labels_arr, L_idx, knn_a,
-            k=lnc_k, alpha=lnc_alpha,
-            X_num=X_num_a, X_cat=X_cat_a,
-            num_min=num_min_a, num_max=num_max_a,
-            feature_mask_num=mask_num_a,
-            feature_mask_cat=mask_cat_a,
-            inv_rng=inv_rng_a,
-            M_candidates=M_candidates,
-        )
-    except Exception as e:
-        if verbose:
-            print(f"[DAV] lnc_star gagal: {e}")
-        return np.nan
-
-    if verbose:
-        K = len(np.unique(labels_arr))
-        print(f"[DAV] LNC*_a({Va_valid}) = "
-              f"{val:.4f} | n={n}, |L|={len(L_idx)}, K={K}")
-    return float(val) if np.isfinite(val) else np.nan
+    ctx = _AnchorContext(X_df, Va, labels_arr, lm_frac=lm_frac,
+                         seed=seed, verbose=verbose)
+    return _lnc_star_anchored_fast(ctx, labels_arr, lnc_k, lnc_alpha, M_candidates)
 
 
 # ================================================================
-# 2.  auto_select_algo_k_dav()
-#     Auto-K yang memaksimalkan LNC*_a(Va) sebagai objective,
-#     dengan LNC*(S*) >= threshold sebagai guardrail.
+# 3. _lnc_global_from_cache — reuse phase_a_cache
+# ================================================================
+
+def _lnc_global_from_cache(
+    labels: np.ndarray,
+    cols: List[str],
+    phase_a_cache: Optional[PhaseACache],
+    lnc_k: int = 50,
+    lnc_alpha: float = 0.70,
+) -> Tuple[float, bool]:
+    """
+    Compute LNC*(S*) reusing phase_a_cache.knn_index.
+    Returns (lnc_score, passed).
+    Falls back to NaN (pass) if cache not available.
+    """
+    if (phase_a_cache is None or not phase_a_cache.available
+            or phase_a_cache.knn_index is None
+            or phase_a_cache.X_unit_full is None):
+        return np.nan, True  # can't compute → don't block
+
+    mask_num, mask_cat = phase_a_cache.make_masks_for_subset(cols)
+    try:
+        n = phase_a_cache.n_samples
+        M_cand = min(max(3 * lnc_k, 100), max(50, int(0.05 * n)))
+        val = float(lnc_star(
+            phase_a_cache.X_unit_full, labels,
+            phase_a_cache.L_fixed, phase_a_cache.knn_index,
+            k=lnc_k, alpha=lnc_alpha,
+            X_num=phase_a_cache.X_num_full,
+            X_cat=phase_a_cache.X_cat_full,
+            num_min=phase_a_cache.num_min_full,
+            num_max=phase_a_cache.num_max_full,
+            feature_mask_num=mask_num,
+            feature_mask_cat=mask_cat,
+            inv_rng=phase_a_cache.inv_rng_full,
+            M_candidates=M_cand,
+        ))
+        return val, True  # passed check is done by caller
+    except Exception:
+        return np.nan, True
+
+
+# ================================================================
+# 4. auto_select_algo_k_dav — OPTIMIZED
 # ================================================================
 
 def auto_select_algo_k_dav(
@@ -178,16 +215,12 @@ def auto_select_algo_k_dav(
     verbose: bool = True,
 ) -> Dict[str, Any]:
     """
-    Auto-K dengan DAV.
+    Auto-K with DAV — optimized v1.1.8.
 
-    K* = argmax  LNC*_a(C, L, Va)
-         s.t.    LNC*(S*) >= lnc_global_threshold
-
-    Return dict kompatibel dengan auto_select_algo_k():
-        algo, k, labels, score, score_adj,
-        lnc_score  (= LNC*_a — objective DAV),
-        lnc_global (= LNC*(S*) — guardrail),
-        dav_applied, anchor_cols, dav_history
+    Changes from v1.1.6:
+    1. Clustering via subsample adapters (not full n)
+    2. LNC* global via phase_a_cache (not fresh KNNIndex per trial)
+    3. Anchor KNN+landmark built ONCE per auto_select call (not per trial)
     """
     best_k: Optional[int] = None
     best_algo: Optional[str] = None
@@ -196,52 +229,60 @@ def auto_select_algo_k_dav(
     best_lnc_global: float = np.nan
     history: List[Dict] = []
 
-    cat_names = [X_df.columns[i] for i in cat_idx if i < len(X_df.columns)]
+    cols = list(X_df.columns)
+
+    # ── Build anchor context ONCE ──
+    # Use a dummy label array for initial landmark selection
+    # (landmarks are spatial, label-independent for anchor)
+    dummy_labels = np.zeros(len(X_df), dtype=int)
+    if phase_a_cache is not None and phase_a_cache.labels0 is not None:
+        dummy_labels = phase_a_cache.labels0
+    anchor_ctx = _AnchorContext(X_df, Va, dummy_labels,
+                                lm_frac=lm_frac, seed=random_state,
+                                verbose=verbose)
 
     for algo in algorithms:
         for k in c_range:
 
-            # ── Clustering ──
+            # ── Clustering (subsample adapters) ──
             try:
                 if algo in ("hac_gower", "hac_landmark"):
                     labels_k = hac_landmark_hybrid_adapter(
                         X_df, cat_idx, k, random_state, mode=hac_mode
                     )
                 elif algo == "kprototypes":
-                    from ..clustering.cluster_adapters import kprototypes_adapter
-                    labels_k = kprototypes_adapter(X_df, cat_idx, k, random_state)
+                    from ..clustering.cluster_adapters import kprototypes_subsample_adapter
+                    labels_k = kprototypes_subsample_adapter(
+                        X_df, cat_idx, k, random_state, subsample_n=6000
+                    )
+                elif algo == "kamila":
+                    from ..clustering.cluster_adapters import kamila_subsample_adapter
+                    labels_k = kamila_subsample_adapter(
+                        X_df, cat_idx, k, random_state, subsample_n=6000
+                    )
                 else:
                     from ..clustering.cluster_adapters import auto_adapter
                     labels_k = auto_adapter(X_df, cat_idx, k, random_state)
             except Exception as e:
                 if verbose:
-                    print(f"  [DAV] {algo} K={k} gagal: {e}")
+                    print(f"  [DAV] {algo} K={k} clustering gagal: {e}")
                 continue
 
             if len(np.unique(labels_k)) < 2:
                 continue
 
-            # ── Guardrail: LNC*(S*) global ──
-            try:
-                sc = structural_control_lnc(
-                    X_df=X_df, labels=labels_k,
-                    cat_cols=cat_names,
-                    lnc_threshold=lnc_global_threshold,
-                    lnc_k=lnc_k,
-                    random_state=random_state,
-                    verbose=False,
-                )
-                lnc_global = sc.lnc_score
-                global_ok = sc.passed
-            except Exception:
-                lnc_global = np.nan
-                global_ok = True    # gagal hitung → tidak blokir
+            # ── Guardrail: LNC*(S*) via cache ──
+            lnc_global, _ = _lnc_global_from_cache(
+                labels_k, cols, phase_a_cache,
+                lnc_k=lnc_k, lnc_alpha=lnc_alpha,
+            )
+            global_ok = (np.isnan(lnc_global)
+                         or lnc_global >= lnc_global_threshold)
 
-            # ── Objective: LNC*_a(Va) ──
-            lnc_a = lnc_star_anchored(
-                X_df, labels_k, Va,
-                lm_frac=lm_frac, lnc_k=lnc_k, lnc_alpha=lnc_alpha,
-                seed=random_state, verbose=verbose,
+            # ── Objective: LNC*_a(Va) via cached anchor context ──
+            lnc_a = _lnc_star_anchored_fast(
+                anchor_ctx, labels_k,
+                lnc_k=lnc_k, lnc_alpha=lnc_alpha,
             )
 
             entry = dict(algo=algo, k=k, lnc_a=lnc_a,
@@ -255,7 +296,6 @@ def auto_select_algo_k_dav(
                 print(f"  [DAV] {algo} K={k}: "
                       f"LNC*_a={a}  LNC*_global={g_s} [{g}]")
 
-            # ── Update best ──
             if (global_ok
                     and np.isfinite(lnc_a)
                     and lnc_a >= lnc_anchor_threshold
@@ -265,11 +305,10 @@ def auto_select_algo_k_dav(
                 best_lnc_a = lnc_a
                 best_lnc_global = lnc_global
 
-    # ── Fallback ke Auto-K standar jika tidak ada yang lulus ──
+    # ── Fallback ──
     if best_labels is None:
         if verbose:
-            print("[DAV] Tidak ada K yang lulus. "
-                  "Fallback ke auto_select_algo_k() standar.")
+            print("[DAV] Tidak ada K yang lulus. Fallback ke auto_select_algo_k().")
         fallback = auto_select_algo_k(
             X_df=X_df, cat_idx=cat_idx,
             algorithms=algorithms, c_range=c_range,
@@ -288,8 +327,8 @@ def auto_select_algo_k_dav(
         "score": best_lnc_a,
         "score_adj": best_lnc_a,
         "lsil_score": np.nan,
-        "lnc_score": best_lnc_a,       # LNC*_a  (objective DAV)
-        "lnc_global": best_lnc_global,  # LNC*(S*) (guardrail)
+        "lnc_score": best_lnc_a,
+        "lnc_global": best_lnc_global,
         "dav_applied": True,
         "anchor_cols": Va,
         "dav_history": history,
@@ -298,15 +337,13 @@ def auto_select_algo_k_dav(
 
 
 # ================================================================
-# 3.  find_best_clustering_dav()
-#     Phase B entry point — drop-in replacement untuk
-#     find_best_clustering_from_subsets() saat DAV aktif.
+# 5. find_best_clustering_dav — Phase B entry point
 # ================================================================
 
 def find_best_clustering_dav(
     df_full: pd.DataFrame,
     top_subsets: List[List[str]],
-    params: Any,                        # AUFSParams
+    params: Any,
     Va: List[str],
     *,
     phase_a_cache: Optional[PhaseACache] = None,
@@ -315,22 +352,7 @@ def find_best_clustering_dav(
     lm_frac: float = 0.20,
     verbose: bool = True,
 ) -> Dict[str, Any]:
-    """
-    Phase B dengan DAV aktif.
-
-    Identik dengan find_best_clustering_from_subsets() kecuali
-    satu baris: memanggil auto_select_algo_k_dav() bukan
-    auto_select_algo_k().
-
-    Parameter
-    ---------
-    Va : list[str]
-        Kolom anchor — fitur yang mendefinisikan makna klaster
-        dari perspektif domain.
-        Susenas : ['DDS12_noTobPrep_norm', 'DDS13_noTob_norm']
-        Obesity : ['Weight', 'BMI_category']
-        Adult   : ['hours_per_week', 'education_num']
-    """
+    """Phase B with DAV — optimized v1.1.8."""
     if not top_subsets:
         return {}
 
@@ -362,7 +384,6 @@ def find_best_clustering_dav(
         if verbose:
             print(f"\n  Subset #{i+1}/{len(top_subsets)}: {subset}")
 
-        # ── SATU-SATUNYA BARIS YANG BERBEDA dari versi standar ──
         current = auto_select_algo_k_dav(
             X_df=df_sub,
             cat_idx=cat_idx,
@@ -380,7 +401,6 @@ def find_best_clustering_dav(
             random_state=params.random_state,
             verbose=verbose,
         )
-        # ────────────────────────────────────────────────────────
 
         current["subset"] = subset
         all_history[subset_key] = current

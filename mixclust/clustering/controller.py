@@ -38,6 +38,12 @@ from .cluster_adapters import (
 )
 
 try:
+    from .cluster_adapters import kamila_adapter, kamila_subsample_adapter
+    _HAS_KAMILA = True
+except Exception:
+    _HAS_KAMILA = False
+
+try:
     from ..metrics.lsil import lsil_using_prototypes_gower
     from ..metrics.lsil import lsil_using_landmarks   # ← tambah import langsung
 except Exception:
@@ -510,9 +516,14 @@ def auto_select_algo_k(
                     X_df, cat_idx, k, random_state, mode=hac_mode
                 )
             elif algo == "kprototypes":
-                return kprototypes_subsample_adapter(   # ← ganti dari kprototypes_adapter
+                return kprototypes_subsample_adapter(
                     X_df, cat_idx, k, random_state,
-                    subsample_n=6000                    # ~18% dari 32k
+                    subsample_n=6000
+                )
+            elif algo == "kamila":
+                return kamila_subsample_adapter(
+                    X_df, cat_idx, k, random_state,
+                    subsample_n=6000
                 )
             elif algo == "kmodes":
                 return kmodes_adapter(X_df, cat_idx, k, random_state)
