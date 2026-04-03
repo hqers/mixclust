@@ -283,4 +283,8 @@ def run_generic_end2end(
         "metrics_path": os.path.join(outdir, "metrics_internal.json"),
         "summary_xlsx_path": xl_path,
         "runtime_s": excel_row["runtime_s"],
+        # ── v1.1.9: expose key metrics langsung agar tidak perlu buka JSON ──
+        "best_K":     metrics.get("best_K"),
+        "final_algo": metrics.get("final_algo"),
+        "dav":        metrics.get("dav"),        # None jika DAV tidak aktif
     }

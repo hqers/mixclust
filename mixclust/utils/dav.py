@@ -2,6 +2,15 @@
 #
 # Domain Anchor Variable (DAV) — Phase B extension untuk MixClust
 #
+# v1.1.9 FIX:
+#   1. DAV winner tidak dibandingkan langsung dengan fallback score (apple vs orange)
+#      find_best_clustering_dav sekarang selalu prioritaskan DAV winner atas fallback
+#   2. lnc_anchor_threshold default diturunkan 0.40 → 0.25
+#      (0.40 terlalu ketat — subset 1 Susenas menghasilkan 0.4033 dan gagal karena
+#       kalah dari fallback score 0.6896 yang mengukur hal berbeda)
+#   3. _AnchorContext: log Va_valid agar jelas variabel mana yang aktif
+#   4. auto_select_algo_k_dav: log jumlah Va yang ditemukan vs diminta
+#
 # v1.1.8 FIX:
 #   1. Clustering pakai subsample adapter (bukan full 334k)
 #   2. LNC* global reuse phase_a_cache.knn_index (bukan bangun ulang)
@@ -48,9 +57,17 @@ class _AnchorContext:
                  lm_frac: float = 0.20, seed: int = 42, verbose: bool = False):
         self.ok = False
         self.Va_valid = [c for c in Va if c in X_df.columns]
+
+        # v1.1.9: log Va yang ditemukan vs diminta agar mudah debug
+        if verbose:
+            missing = [c for c in Va if c not in X_df.columns]
+            print(f"[DAV] Anchor context: Va diminta={Va}")
+            print(f"[DAV]   Va ditemukan={self.Va_valid}"
+                  + (f", tidak ada di subset={missing}" if missing else ""))
+
         if not self.Va_valid:
             if verbose:
-                print(f"[DAV] Anchor cols tidak ditemukan: {Va}")
+                print(f"[DAV] Tidak ada Va yang ditemukan di subset — skip anchor context")
             return
 
         X_anchor = X_df[self.Va_valid]
@@ -94,7 +111,7 @@ class _AnchorContext:
 
         self.ok = True
         if verbose:
-            print(f"[DAV] Anchor context: Va={self.Va_valid}, "
+            print(f"[DAV] Anchor context OK: |Va_valid|={len(self.Va_valid)}, "
                   f"|L|={len(self.L_idx)}, n={n}")
 
 
@@ -193,7 +210,7 @@ def _lnc_global_from_cache(
 
 
 # ================================================================
-# 4. auto_select_algo_k_dav — OPTIMIZED
+# 4. auto_select_algo_k_dav — OPTIMIZED v1.1.9
 # ================================================================
 
 def auto_select_algo_k_dav(
@@ -205,7 +222,7 @@ def auto_select_algo_k_dav(
     *,
     phase_a_cache: Optional[PhaseACache] = None,
     lnc_global_threshold: float = 0.50,
-    lnc_anchor_threshold: float = 0.40,
+    lnc_anchor_threshold: float = 0.25,   # v1.1.9: diturunkan dari 0.40 → 0.25
     lm_frac: float = 0.20,
     lnc_k: int = 50,
     lnc_alpha: float = 0.70,
@@ -215,12 +232,15 @@ def auto_select_algo_k_dav(
     verbose: bool = True,
 ) -> Dict[str, Any]:
     """
-    Auto-K with DAV — optimized v1.1.8.
+    Auto-K with DAV — v1.1.9.
 
-    Changes from v1.1.6:
-    1. Clustering via subsample adapters (not full n)
-    2. LNC* global via phase_a_cache (not fresh KNNIndex per trial)
-    3. Anchor KNN+landmark built ONCE per auto_select call (not per trial)
+    Changes from v1.1.8:
+    1. lnc_anchor_threshold default: 0.40 → 0.25
+       Nilai 0.40 terlalu ketat pada data real-world berskala besar.
+       LNC*_a mengukur kohesi lokal di ruang Va yang biasanya lebih sempit
+       dari S*, sehingga skor absolut lebih rendah dari LNC*(S*).
+    2. Log Va_valid vs Va_requested agar mudah debug ketika subset
+       tidak mengandung semua variabel anchor.
     """
     best_k: Optional[int] = None
     best_algo: Optional[str] = None
@@ -232,14 +252,20 @@ def auto_select_algo_k_dav(
     cols = list(X_df.columns)
 
     # ── Build anchor context ONCE ──
-    # Use a dummy label array for initial landmark selection
-    # (landmarks are spatial, label-independent for anchor)
     dummy_labels = np.zeros(len(X_df), dtype=int)
     if phase_a_cache is not None and phase_a_cache.labels0 is not None:
         dummy_labels = phase_a_cache.labels0
     anchor_ctx = _AnchorContext(X_df, Va, dummy_labels,
                                 lm_frac=lm_frac, seed=random_state,
                                 verbose=verbose)
+
+    # v1.1.9: log jika Va yang ditemukan sangat sedikit
+    if verbose and anchor_ctx.ok:
+        n_va_found = len(anchor_ctx.Va_valid)
+        n_va_req = len(Va)
+        if n_va_found < n_va_req:
+            print(f"[DAV] ⚠ Hanya {n_va_found}/{n_va_req} Va ditemukan di subset ini. "
+                  f"LNC*_a mungkin kurang representatif.")
 
     for algo in algorithms:
         for k in c_range:
@@ -308,7 +334,16 @@ def auto_select_algo_k_dav(
     # ── Fallback ──
     if best_labels is None:
         if verbose:
-            print("[DAV] Tidak ada K yang lulus. Fallback ke auto_select_algo_k().")
+            # v1.1.9: tampilkan threshold yang dipakai agar mudah tuning
+            best_trial = max(history, key=lambda x: x.get('lnc_a', -1)
+                             if np.isfinite(x.get('lnc_a', float('nan'))) else -1,
+                             default=None)
+            if best_trial and np.isfinite(best_trial.get('lnc_a', float('nan'))):
+                print(f"[DAV] Tidak ada K yang lulus threshold={lnc_anchor_threshold:.2f}. "
+                      f"Best LNC*_a yang ditemukan: {best_trial['lnc_a']:.4f} "
+                      f"(K={best_trial['k']}). Fallback ke auto_select_algo_k().")
+            else:
+                print(f"[DAV] Tidak ada K yang lulus. Fallback ke auto_select_algo_k().")
         fallback = auto_select_algo_k(
             X_df=X_df, cat_idx=cat_idx,
             algorithms=algorithms, c_range=c_range,
@@ -337,7 +372,7 @@ def auto_select_algo_k_dav(
 
 
 # ================================================================
-# 5. find_best_clustering_dav — Phase B entry point
+# 5. find_best_clustering_dav — Phase B entry point v1.1.9
 # ================================================================
 
 def find_best_clustering_dav(
@@ -348,11 +383,20 @@ def find_best_clustering_dav(
     *,
     phase_a_cache: Optional[PhaseACache] = None,
     lnc_global_threshold: float = 0.50,
-    lnc_anchor_threshold: float = 0.40,
+    lnc_anchor_threshold: float = 0.25,   # v1.1.9: 0.40 → 0.25
     lm_frac: float = 0.20,
     verbose: bool = True,
 ) -> Dict[str, Any]:
-    """Phase B with DAV — optimized v1.1.8."""
+    """Phase B with DAV — v1.1.9.
+
+    FIX v1.1.9: DAV winner selalu diprioritaskan atas fallback result.
+    Sebelumnya score_adj dibandingkan langsung antara DAV (LNC*_a) dan
+    fallback (LNC*_S*) — ini apple vs orange karena keduanya mengukur
+    hal berbeda dengan skala berbeda. Sekarang:
+      - DAV winner   > fallback         → selalu pilih DAV winner
+      - DAV winner   > DAV winner lain  → pilih yang LNC*_a lebih tinggi
+      - fallback     > fallback lain    → pilih yang score_adj lebih tinggi
+    """
     if not top_subsets:
         return {}
 
@@ -368,6 +412,7 @@ def find_best_clustering_dav(
     if verbose:
         print(f"\n[DAV Phase B] {len(top_subsets)} subset | Va={Va} | "
               f"c_range={list(c_range)} | "
+              f"anchor_threshold={lnc_anchor_threshold:.2f} | "
               f"guardrail LNC*(S*)>={lnc_global_threshold}")
 
     best_overall: Optional[Dict[str, Any]] = None
@@ -405,22 +450,47 @@ def find_best_clustering_dav(
         current["subset"] = subset
         all_history[subset_key] = current
 
-        cur_s = current.get("score_adj", -np.inf)
-        best_s = best_overall.get("score_adj", -np.inf) if best_overall else -np.inf
+        # ── v1.1.9: fair comparison — DAV winner > fallback ──────────────
+        cur_is_dav  = current.get("dav_applied", False)
+        best_is_dav = best_overall.get("dav_applied", False) if best_overall else False
 
-        if best_overall is None or cur_s > best_s:
+        def _should_update(cur: Dict, best: Optional[Dict]) -> bool:
+            if best is None:
+                return True
+            c_dav = cur.get("dav_applied", False)
+            b_dav = best.get("dav_applied", False)
+            if c_dav and not b_dav:
+                # DAV winner selalu mengalahkan fallback — tidak bandingkan score
+                return True
+            if not c_dav and b_dav:
+                # Fallback tidak boleh mengalahkan DAV winner
+                return False
+            if c_dav and b_dav:
+                # Keduanya DAV — bandingkan LNC*_a
+                return cur.get("lnc_score", -np.inf) > best.get("lnc_score", -np.inf)
+            # Keduanya fallback — bandingkan score_adj seperti sebelumnya
+            return cur.get("score_adj", -np.inf) > best.get("score_adj", -np.inf)
+
+        if _should_update(current, best_overall):
             best_overall = current
             if verbose:
                 da = current.get("dav_applied", False)
+                lnca = current.get('lnc_score', float('nan'))
+                lncg = current.get('lnc_global', float('nan'))
+                lnca_str = f"{lnca:.4f}" if np.isfinite(lnca) else "nan"
+                lncg_str = f"{lncg:.4f}" if np.isfinite(lncg) else "nan"
                 print(f"  ★ Best K={current.get('k')} "
                       f"algo={current.get('algo')} "
-                      f"LNC*_a={current.get('lnc_score', np.nan):.4f} "
-                      f"LNC*_global={current.get('lnc_global', np.nan):.4f} "
+                      f"LNC*_a={lnca_str} "
+                      f"LNC*_global={lncg_str} "
                       f"{'[DAV ✓]' if da else '[fallback]'}")
 
     if verbose:
-        print(f"\n[DAV Phase B DONE] K*={best_overall.get('k') if best_overall else None}"
-              f" ({perf_counter()-t0:.1f}s)")
+        k_final = best_overall.get('k') if best_overall else None
+        dav_final = best_overall.get('dav_applied', False) if best_overall else False
+        print(f"\n[DAV Phase B DONE] K*={k_final} "
+              f"{'[DAV ✓]' if dav_final else '[fallback]'} "
+              f"({perf_counter()-t0:.1f}s)")
 
     if best_overall:
         best_overall["all_run_history"] = {str(k): v for k, v in all_history.items()}
