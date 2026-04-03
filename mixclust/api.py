@@ -207,7 +207,9 @@ class AUFSParams:
     dav_anchor_cols: Optional[List[str]] = None
     dav_lnc_global_threshold: float = 0.50
     dav_lnc_anchor_threshold: float = 0.40
-    dav_lm_frac: float = 0.20
+    dav_lm_c: float = 3.0                    # v1.1.10: landmark count = lm_c * sqrt(n_sub)
+    dav_anchor_subsample_n: int = 10_000     # v1.1.10: subsample size for AnchorContext
+    dav_lm_frac: float = 0.20               # deprecated — kept for backward compat, not used
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -496,8 +498,9 @@ def run_aufs_samba(
                 Va=_dav_Va,
                 phase_a_cache=phase_a_cache,
                 lnc_global_threshold=getattr(params, 'dav_lnc_global_threshold', 0.50),
-                lnc_anchor_threshold=getattr(params, 'dav_lnc_anchor_threshold', 0.40),
-                lm_frac=getattr(params, 'dav_lm_frac', 0.20),
+                lnc_anchor_threshold=getattr(params, 'dav_lnc_anchor_threshold', 0.25),
+                lm_c=getattr(params, 'dav_lm_c', 3.0),
+                anchor_subsample_n=getattr(params, 'dav_anchor_subsample_n', 10_000),
                 verbose=params.verbose,
             )
         else:

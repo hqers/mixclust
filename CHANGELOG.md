@@ -52,12 +52,13 @@ After:  ~60-120s (~1-2 minutes)
 | File | Path |
 |------|------|
 | `dav.py` | `mixclust/utils/dav.py` |
+| `api.py` | `mixclust/api.py` |
 | `__init__.py` | `mixclust/__init__.py` |
 | `pyproject.toml` | `pyproject.toml` |
 
 ### Git commit
 ```bash
-git add mixclust/utils/dav.py mixclust/__init__.py pyproject.toml
+git add mixclust/utils/dav.py mixclust/api.py mixclust/__init__.py pyproject.toml
 git commit -m "perf: DAV 60x speedup — c*sqrt(n) landmark, anchor subsample, cross-subset cache (v1.1.10)"
 git tag v1.1.10
 git push && git push --tags
