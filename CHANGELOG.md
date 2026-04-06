@@ -1,3 +1,81 @@
+## v1.1.11 (patch)
+
+### Fix: Phase B kprototypes label-cache misalignment
+
+**Problem:** In v1.1.10, `kprototypes` in Phase B always fit on a 6K
+subsample (via `kprototypes_subsample_adapter`). This produced `labels_B`
+that diverged from `labels0` used to build `L_fixed` in Phase A.
+Since `L_fixed` is cluster-aware (placed near centroids of `labels0`),
+evaluating `labels_B` against `L_fixed` systematically under-estimated
+L-Sil for kprototypes. As a result the auto-adapter often selected
+`hac_gower` even when kprototypes produced better SS-Gower.
+
+**Root cause summary:**
+```
+Phase A:  labels0  = kproto(subsample 6K) → NN-propagated to full n
+          L_fixed  = cluster_aware_landmarks(labels0)   ← placed near labels0 centroids
+
+Phase B:  labels_B = kproto(NEW subsample 6K) → slightly different partition
+          L-Sil(kproto) evaluated against L_fixed biased toward labels0
+          → kproto L-Sil under-estimated → hac_gower wins unfairly
+```
+
+**Fix — three-path strategy in `_run_algo` (controller.py only):**
+
+| Path | Condition | Behaviour |
+|------|-----------|-----------|
+| A | n ≤ 10,000 | `kprototypes_adapter` on full data — accurate & fast |
+| B | n > 10,000 AND cache available | derive labels from `labels0` via merge/split — O(n), deterministic, consistent with L_fixed |
+| C | n > 10,000 AND no cache | subsample fallback (v1.1.10 behaviour) |
+
+Two helper functions added to `controller.py`:
+- `_merge_labels_to_k`: merge smallest cluster pairs to reach k_target
+- `_split_labels_to_k`: bisect largest cluster via kprototypes(k=2)
+
+**What does NOT change (by design):**
+- `reward.py` — Phase A logic, labels0, L_fixed unchanged
+- `landmarks.py` — landmark selection unchanged
+- `lsil.py` / `lnc_star.py` — metric computation unchanged
+- `phase_a_cache.py` — cache structure unchanged
+- `mab.py` / `sa.py` — feature selection unchanged
+- `S*` (selected features) — identical to v1.1.10
+
+**Will results change vs v1.1.10?**
+
+| Dataset size | Change expected? |
+|---|---|
+| n ≤ 6K (CMC, CylinderBands, HeartDisease, etc.) | No — Path A, same as full kproto |
+| n 6K–10K (Obesity) | Possibly minor — now full kproto vs subsample |
+| n > 10K (Adult, BankMarketing, Susenas) | Yes — Path B replaces subsample |
+
+Auto-adapter claim preserved: both kprototypes and hac_gower still
+compete in Phase B. Fix ensures the competition is fair.
+
+**Random seed:** fully deterministic within v1.1.11 via AUFSParams.random_state.
+Results differ from v1.1.10 by design (bug fix), not by randomness.
+
+### Files changed
+| File | Change |
+|------|--------|
+| `controller.py` | `_run_algo`: three-path kproto, add `_merge_labels_to_k`, `_split_labels_to_k` |
+| `__init__.py` | version bump to 1.1.11 |
+| `pyproject.toml` | version bump to 1.1.11 |
+
+### Git commit
+```bash
+git add mixclust/clustering/controller.py mixclust/__init__.py pyproject.toml
+git commit -m "fix: Phase B kproto label-cache misalignment — three-path strategy (v1.1.11)
+
+- Path A (n<=10K): full kprototypes_adapter — deterministic, no subsample
+- Path B (n>10K + cache): derive from labels0 via merge/split — O(n),
+  consistent with L_fixed, eliminates L-Sil under-estimation
+- Path C (fallback): v1.1.10 subsample behaviour
+
+Helpers added: _merge_labels_to_k, _split_labels_to_k
+No changes to reward.py, landmarks.py, lsil.py, lnc_star.py, sa.py, mab.py"
+git tag v1.1.11
+git push && git push --tags
+```
 # CHANGELOG — mixclust
 
 ## v1.1.10 (2026-04-04)
@@ -288,3 +366,4 @@ undetected until post-hoc profile inspection.
 - `|L| = c*sqrt(n)` (Theorem 1), default c=3
 - PhaseACache infrastructure introduced
 - Backward-compatible: `lsil_using_prototypes_gower` still exported
+
