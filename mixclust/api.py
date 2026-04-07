@@ -923,9 +923,12 @@ def auto_params(
     lsil_topk = max(2, min(5, c_max - c_min))
 
     # ── 9. Subsample sizes — proportional to n ───────────────────
-    sub_n    = min(n, max(2000,  int(0.02 * n)))   # Phase A cluster
-    pb_eval  = min(n, max(10000, int(0.10 * n)))   # Phase B L-Sil eval
-    lsil_eval= min(n, max(5000,  int(0.06 * n)))   # SA reward eval
+    # S6: high missing_ratio → reduce subsample (missing rows less useful)
+    # missing > 0.3 → scale down by 30%; missing > 0.5 → scale down 50%
+    missing_scale = max(0.5, 1.0 - prof['missing_ratio'])
+    sub_n    = min(n, max(2000,  int(0.02 * n * missing_scale)))  # Phase A cluster
+    pb_eval  = min(n, max(10000, int(0.10 * n)))                  # Phase B L-Sil eval
+    lsil_eval= min(n, max(5000,  int(0.06 * n)))                  # SA reward eval
 
     # ── 10. sc_lnc_threshold — relax for large n ─────────────────
     # Large n → more heterogeneous → LNC* naturally lower
