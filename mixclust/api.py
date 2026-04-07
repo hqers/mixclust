@@ -126,7 +126,7 @@ class AUFSParams:
     sa_min_temp: float = 1e-3
     sa_cooling_alpha: float = 0.95
     sa_neighbor_mode: str = "swap"
-    sa_min_size: int = 2
+    sa_min_size: int = 3               # validated default
     sa_max_size: Optional[int] = None
     sa_exploit_sample_rate: Optional[float] = None
 
@@ -161,12 +161,12 @@ class AUFSParams:
 
     # Phase B tuning
     phase_b_eval_n: int = 30_000       # subsample L-Sil di Phase B
-    phase_b_skip_lnc: bool = False     # skip LNC* per trial (hemat ~30s/trial)
+    phase_b_skip_lnc: bool = True      # skip LNC* per trial (default True — hemat ~30s/trial)
 
     # Redundancy
     kmsnc_k: int = 5
     build_redundancy_cache: Optional[str] = None
-    build_redundancy_parallel: bool = False
+    build_redundancy_parallel: bool = True    # parallel build (default True)
     red_row_subsample: Optional[int] = None
     red_backend: str = "loky"
     red_batch_size: int = 500
@@ -196,7 +196,7 @@ class AUFSParams:
     cluster_adapter_lambda: float = 0.6
     enable_screening: bool = True
     screening_k_values: tuple = (2, 3, 4)
-    screening_prune_threshold: float = 0.15
+    screening_prune_threshold: float = 0.20  # validated default
 
     # Misc
     random_state: int = 42
