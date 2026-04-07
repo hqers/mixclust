@@ -16,7 +16,7 @@ Paste cell ini di awal notebook untuk memastikan versi selalu up-to-date:
 import sys, subprocess
 
 GITHUB_URL  = "git+https://github.com/hqers/mixclust.git"
-MIN_VERSION = "1.0.7"  # update sesuai versi minimum yang diperlukan
+MIN_VERSION = "1.0.11"  # update sesuai versi minimum yang diperlukan
 
 def _ver(v):
     try: return tuple(int(x) for x in v.split("."))
