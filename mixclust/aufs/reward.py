@@ -214,6 +214,14 @@ def make_sa_reward(
     lsil_eval_n: int = 20_000,
     lsil_c_reward: Optional[float] = None,
     subsample_n_cluster: int = 6_000,
+    # ── Parameter baru v1.1.12 ──────────────────────────────────
+    # "cluster_aware" (default, paper JDSA): cluster-aware landmarks
+    #   80% central + 20% boundary — optimal BCVD mitigation for known K,
+    #   biased toward K_hint when auto_k evaluates other K values.
+    # "kcenter": K-agnostic k-center greedy landmarks.
+    #   Maximally spread — fair for all K values, slightly higher BCVD risk.
+    #   Recommended when auto_k=True and c_min < c_max.
+    landmark_mode: str = "cluster_aware",
 ):
     n_full = len(df_full)
 
@@ -436,18 +444,48 @@ def make_sa_reward(
             rng=np.random.default_rng(random_state)
         )
 
-        # Landmark full untuk Phase B
+        # Landmark full untuk Phase B — v1.1.12: dua strategi
         m_full = adaptive_landmark_count(n_full, K=n_clusters,
                                          c=lsil_c, cap_frac=lsil_cap_frac)
-        L_fixed_full = cluster_aware_landmarks_on_subsample(
-            df_full=df_full, idx_sub=idx_sub_cl,
-            labels_sub=labels_sub_cl, labels_full=labels0,
-            m_cap=m_full, per_cluster_min=3,
-            random_state=random_state,
-            select_landmarks_fn=select_landmarks_cluster_aware,
-        )
-        print(f"[reward] eval_n={eval_n:,}, |L_eval|={len(L_eval)}, "
-              f"|L_full|={len(L_fixed_full)}")
+
+        if landmark_mode == "kcenter":
+            # K-agnostic: k-center greedy — fair untuk semua K di Phase B
+            # Tidak bergantung pada labels0/K_hint → tidak ada bias auto-K
+            # Trade-off: sedikit lebih rentan BCVD karena tidak ada
+            # cluster-aware placement, tapi di-kompensasi oleh topk aggregation
+            from ..core.features import build_features as _bf
+            try:
+                X_unit_lm, _, _ = _bf(
+                    df_full, label_col=None,
+                    scaler_type="standard", unit_norm=True
+                )
+                L_fixed_full = select_landmarks_kcenter(
+                    X_unit_lm, m=m_full, seed=random_state
+                )
+                print(f"[reward] landmark_mode=kcenter |L_full|={len(L_fixed_full)} "
+                      f"(K-agnostic, fair auto-K)")
+            except Exception as e:
+                print(f"[reward] kcenter gagal ({e}), fallback ke cluster_aware")
+                L_fixed_full = cluster_aware_landmarks_on_subsample(
+                    df_full=df_full, idx_sub=idx_sub_cl,
+                    labels_sub=labels_sub_cl, labels_full=labels0,
+                    m_cap=m_full, per_cluster_min=3,
+                    random_state=random_state,
+                    select_landmarks_fn=select_landmarks_cluster_aware,
+                )
+        else:
+            # cluster_aware (default, paper JDSA):
+            # 80% central + 20% boundary — optimal BCVD mitigation
+            # Biased toward K_hint tapi akurat untuk K dekat K_hint
+            L_fixed_full = cluster_aware_landmarks_on_subsample(
+                df_full=df_full, idx_sub=idx_sub_cl,
+                labels_sub=labels_sub_cl, labels_full=labels0,
+                m_cap=m_full, per_cluster_min=3,
+                random_state=random_state,
+                select_landmarks_fn=select_landmarks_cluster_aware,
+            )
+            print(f"[reward] landmark_mode=cluster_aware |L_full|={len(L_fixed_full)} "
+                  f"(JDSA default)")
 
         def make_masks_for_subset(cols):
             mnum = np.zeros(X_num_e.shape[1], dtype=bool) \

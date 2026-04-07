@@ -202,6 +202,17 @@ class AUFSParams:
     random_state: int = 42
     verbose: bool = True
     show_progress: bool = True
+
+    # v1.1.12 — landmark strategy for Phase B cache
+    # "cluster_aware" (default): cluster-aware landmarks, paper JDSA default.
+    #   80% central + 20% boundary per cluster — optimal BCVD mitigation
+    #   for known K, but biased toward K_hint when evaluating other K values.
+    # "kcenter": K-agnostic k-center greedy landmarks.
+    #   Maximally spread in feature space — fair evaluation for all K values,
+    #   slightly higher BCVD risk but eliminates auto-K bias toward K_hint.
+    # Recommendation: use "kcenter" when auto_k=True and c_min < c_max,
+    #   use "cluster_aware" when K is fixed or known a priori.
+    landmark_mode: str = "cluster_aware"
     
     # DAV — Domain Anchor Variable (opsional, default None = nonaktif)
     dav_anchor_cols: Optional[List[str]] = None
@@ -357,6 +368,7 @@ def run_aufs_samba(
         lsil_eval_n=params.lsil_eval_n,
         lsil_c_reward=params.lsil_c_reward,
         subsample_n_cluster=params.subsample_n_cluster,
+        landmark_mode=getattr(params, 'landmark_mode', 'cluster_aware'),
     )
     timing["build_reward_s"] = perf_counter() - t0
     if verbose:
@@ -715,6 +727,7 @@ def find_best_feature_subsets(
         lsil_eval_n=params.lsil_eval_n,
         lsil_c_reward=params.lsil_c_reward,
         subsample_n_cluster=params.subsample_n_cluster,
+        landmark_mode=getattr(params, 'landmark_mode', 'cluster_aware'),
     )
 
     reward_for_mab = make_mab_reward_from_matrix(red_mat)
@@ -762,3 +775,224 @@ def find_best_feature_subsets(
     if verbose:
         print(f"\n[FASE A SELESAI] Ditemukan {len(top_k_subsets)} kandidat subset fitur terbaik.")
     return top_k_subsets, info
+
+# ─────────────────────────────────────────────────────────────────
+# v1.1.12 — auto_params: self-configuring AUFSParams from data
+# ─────────────────────────────────────────────────────────────────
+
+def _profile_data(df: pd.DataFrame) -> dict:
+    """
+    Extract data signals for adaptive parameter selection.
+    O(n*p) — runs once before any clustering.
+    All signals derivable without labels or domain knowledge.
+    """
+    n, p = df.shape
+    cat_cols    = df.select_dtypes(include=['object','category','bool']).columns
+    binary_cols = [c for c in df.columns if df[c].nunique() == 2]
+    spike_cols  = [c for c in df.columns
+                   if df[c].value_counts(normalize=True).iloc[0] > 0.5]
+    missing     = float(df.isna().mean().mean())
+    cat_ratio    = len(cat_cols) / p
+    binary_ratio = len(binary_cols) / p
+    spike_ratio  = len(spike_cols) / p
+    # entropy proxy: spike = low entropy, no-spike = high entropy
+    entropy_ratio = max(0.0, 1.0 - spike_ratio)
+    return {
+        'n': n, 'p': p,
+        'cat_ratio':     cat_ratio,
+        'binary_ratio':  binary_ratio,
+        'spike_ratio':   spike_ratio,
+        'entropy_ratio': entropy_ratio,
+        'missing_ratio': missing,
+        'n_ratio':       n / 10_000,
+    }
+
+
+def auto_params(
+    df: pd.DataFrame,
+    **overrides,
+) -> 'AUFSParams':
+    """
+    Derive ALL sensible AUFSParams from data characteristics.
+    Target: zero manual parameter tuning for standard use cases.
+
+    Signals extracted from df (O(n*p), runs once):
+      n_ratio      = n / 10_000
+      cat_ratio    = p_cat / p
+      binary_ratio = p_binary / p       (geometric dominance risk)
+      spike_ratio  = p_spike / p        (cols where top value >50%)
+      entropy_ratio= 1 - spike_ratio    (proxy for data diversity)
+      missing_ratio= mean(isna fraction)
+
+    Auto-computed parameters (13 total):
+      lsil_c, c_max, screening_k_values  — landmark & K range
+      landmark_mode                       — kcenter vs cluster_aware
+      cluster_adapter_lambda              — L-Sil vs LNC* balance
+      auto_algorithms                     — algorithm candidates
+      mab_T, mab_k, sa_iters             — MAB/SA exploration
+      lsil_topk                           — topk aggregation
+      subsample_n_cluster                 — Phase A cluster subsample
+      phase_b_eval_n                      — Phase B eval subsample
+      lsil_eval_n                         — SA reward eval subsample
+      sc_lnc_threshold                    — structural control threshold
+
+    Fixed regardless of data (controlled by engine_mode user arg):
+      engine_mode     : "C" (full MixClust) unless user passes "A" (AUFS only)
+      sa_neighbor_mode: "full" for engine C, "swap" for engine A
+      hac_mode        : "hybrid" always (production mode)
+      phase_b_skip_lnc: True always (speed optimization)
+
+    User-controlled (not auto):
+      random_state, verbose, show_progress
+      build_redundancy_cache, dav_anchor_cols
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Dataset to cluster (features only, no label column).
+    **overrides
+        Any AUFSParams field — takes precedence over auto values.
+        Pass engine_mode="A" for AUFS-Samba standalone.
+
+    Example
+    -------
+    >>> params = auto_params(df, random_state=42)
+    >>> result = run_generic_end2end(df, outdir='out/', params=params)
+
+    >>> # AUFS-Samba only (no controller, no auto-K):
+    >>> params = auto_params(df, engine_mode="A", random_state=42)
+    """
+    import math
+
+    prof = _profile_data(df)
+    n           = prof['n']
+    p           = prof['p']
+    cat_ratio   = prof['cat_ratio']
+    binary_ratio= prof['binary_ratio']
+    spike_ratio = prof['spike_ratio']
+    entropy_r   = prof['entropy_ratio']
+    n_ratio     = prof['n_ratio']
+
+    c_min = overrides.get('c_min', 2)
+
+    # ── 1. lsil_c — log-proportional, floor 3.0 (Theorem 1) ─────
+    c_lsil = max(3.0, 3.0 * math.log10(max(n, 10)) / math.log10(1000))
+    c_lsil = round(c_lsil, 1)
+
+    # ── 2. c_max ─────────────────────────────────────────────────
+    c_max = min(int(math.log2(max(n, 4))), int(math.sqrt(n / 2)), 20)
+    c_max = max(c_max, c_min + 1)
+
+    # ── 3. screening_k_values — evenly-spaced from c_range ───────
+    c_range = list(range(c_min, c_max + 1))
+    n_pts   = min(4, len(c_range))
+    idx     = np.linspace(0, len(c_range) - 1, n_pts, dtype=int)
+    screening_k = tuple(c_range[i] for i in idx)
+
+    # ── 4. landmark_mode ─────────────────────────────────────────
+    # kcenter if: large n (K range matters more), or binary/spike risk
+    # cluster_aware if: small n, low geometric dominance risk
+    geo_dom_risk = (n_ratio > 1) or (binary_ratio > 0.3) or (spike_ratio > 0.4)
+    landmark_mode = "kcenter" if geo_dom_risk else "cluster_aware"
+
+    # ── 5. cluster_adapter_lambda ────────────────────────────────
+    # cat-heavy → lower lambda (trust LNC* structure more)
+    # num-heavy → higher lambda (L-Sil more reliable)
+    if cat_ratio > 0.6:
+        lam = 0.4
+    elif cat_ratio < 0.3:
+        lam = 0.7
+    else:
+        lam = 0.6
+
+    # ── 6. auto_algorithms ───────────────────────────────────────
+    # kamila = model-based EM, not feasible for n > 10K
+    if cat_ratio == 0.0:
+        algos = ["kmeans"]
+    elif n > 10_000:
+        algos = ["kprototypes", "hac_gower"]
+    else:
+        algos = ["kprototypes", "hac_gower"]
+
+    # ── 7. MAB/SA — scale with data diversity ────────────────────
+    mab_T    = max(8,  min(20,  int(12 * (1 + 0.3 * entropy_r))))
+    mab_k    = max(3,  min(10,  p // 4))
+    sa_iters = max(30, min(100, int(50 * (1 + 0.3 * entropy_r))))
+
+    # ── 8. lsil_topk — scale with K range ────────────────────────
+    lsil_topk = max(2, min(5, c_max - c_min))
+
+    # ── 9. Subsample sizes — proportional to n ───────────────────
+    sub_n    = min(n, max(2000,  int(0.02 * n)))   # Phase A cluster
+    pb_eval  = min(n, max(10000, int(0.10 * n)))   # Phase B L-Sil eval
+    lsil_eval= min(n, max(5000,  int(0.06 * n)))   # SA reward eval
+
+    # ── 10. sc_lnc_threshold — relax for large n ─────────────────
+    # Large n → more heterogeneous → LNC* naturally lower
+    if n < 50_000:
+        sc_thr = 0.5
+    else:
+        sc_thr = round(max(0.4, 0.5 - 0.1 * math.log10(n / 50_000)), 2)
+
+    # ── 11. engine_mode → sa_neighbor_mode ───────────────────────
+    engine = overrides.get('engine_mode', 'C')
+    sa_neighbor = "swap" if engine == "A" else "full"
+
+    auto = dict(
+        # landmark & K range
+        lsil_c             = c_lsil,
+        c_min              = c_min,
+        c_max              = c_max,
+        screening_k_values = screening_k,
+        landmark_mode      = landmark_mode,
+        # clustering strategy
+        cluster_adapter_lambda = lam,
+        auto_algorithms    = algos,
+        # MAB / SA
+        mab_T              = mab_T,
+        mab_k              = mab_k,
+        sa_iters           = sa_iters,
+        # eval
+        lsil_topk          = lsil_topk,
+        subsample_n_cluster= sub_n,
+        phase_b_eval_n     = pb_eval,
+        lsil_eval_n        = lsil_eval,
+        # structural control
+        sc_lnc_threshold   = sc_thr,
+        # fixed/engine-driven
+        engine_mode        = engine,
+        sa_neighbor_mode   = sa_neighbor,
+        hac_mode           = "hybrid",
+        phase_b_skip_lnc   = True,
+    )
+    # user overrides take precedence
+    auto.update(overrides)
+
+    if auto.get('verbose', False):
+        lm_tag = "kcenter (K-agnostic)" if auto['landmark_mode']=="kcenter" \
+                 else "cluster_aware (JDSA default)"
+        print(f"[auto_params] n={n:,}  p={p}")
+        print(f"  Signals: cat={cat_ratio:.0%}  binary={binary_ratio:.0%}  "
+              f"spike={spike_ratio:.0%}  missing={prof['missing_ratio']:.0%}")
+        print(f"  lsil_c={auto['lsil_c']}  |L|={int(auto['lsil_c']*n**0.5):,}  "
+              f"c_max={auto['c_max']}")
+        print(f"  landmark_mode  = {lm_tag}")
+        print(f"  lambda         = {auto['cluster_adapter_lambda']}  "
+              f"algos={auto['auto_algorithms']}")
+        print(f"  mab_T={auto['mab_T']}  mab_k={auto['mab_k']}  "
+              f"sa_iters={auto['sa_iters']}  lsil_topk={auto['lsil_topk']}")
+        print(f"  sub_n={auto['subsample_n_cluster']:,}  "
+              f"pb_eval={auto['phase_b_eval_n']:,}  "
+              f"lsil_eval={auto['lsil_eval_n']:,}")
+        print(f"  sc_lnc_threshold={auto['sc_lnc_threshold']}  "
+              f"engine={auto['engine_mode']}  "
+              f"sa_neighbor={auto['sa_neighbor_mode']}")
+        if geo_dom_risk:
+            print(f"  ⚠  Geometric dominance risk detected "
+                  f"(n_ratio={n_ratio:.1f}, binary={binary_ratio:.0%}, "
+                  f"spike={spike_ratio:.0%})")
+            if spike_ratio > 0.4 and binary_ratio > 0.2:
+                print(f"  ⚠  Consider DAV if domain anchor variables are available")
+
+    return AUFSParams(**{k: v for k, v in auto.items()
+                         if k in AUFSParams.__dataclass_fields__})

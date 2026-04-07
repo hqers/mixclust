@@ -1,3 +1,95 @@
+## v1.1.12
+
+### Fix: Auto-K bias toward K_hint — two landmark strategies
+
+**Root cause identified:**
+
+`L_fixed` (the Phase B cache landmark set) was always built using
+`cluster_aware_landmarks_on_subsample` with `labels0` from `K=n_clusters_hint`.
+Landmarks were placed near centroids/boundaries of that specific K.
+
+When Phase B evaluates K values far from K_hint:
+- K=2 evaluation: two large clusters separate cleanly in landmark space → L-Sil inflated
+- K=4 evaluation: four smaller clusters poorly represented by K_hint landmarks → L-Sil deflated
+- Result: auto-K systematically favors K values close to K_hint, regardless of actual SS-Gower
+
+**Fix — two landmark strategies, selectable via `landmark_mode`:**
+
+| Mode | Algorithm | BCVD | Auto-K bias | When to use |
+|------|-----------|------|-------------|-------------|
+| `"cluster_aware"` (default) | 80% central + 20% boundary per cluster | Low | Yes (biased to K_hint) | Fixed K or narrow K range |
+| `"kcenter"` | k-center greedy, K-agnostic | Slightly higher | None | `auto_k=True` with wide K range |
+
+Both modes: Theorem 1 holds, O(n·|L|) unchanged, L-Sil/LNC* computation unchanged.
+
+**`auto_params()` selects automatically:**
+```python
+landmark_mode = "kcenter"       if (c_max - c_min) > 1  # wide auto-K range
+              = "cluster_aware"  otherwise                # fixed/narrow K
+```
+
+**Manual override:**
+```python
+# Force kcenter for fair auto-K evaluation
+params = auto_params(df, landmark_mode="kcenter")
+
+# Force cluster_aware (paper default, best BCVD mitigation)
+params = AUFSParams(landmark_mode="cluster_aware", ...)
+```
+
+### New: `auto_params(df, **overrides)` — self-configuring AUFSParams
+
+Three parameters auto-computed from data:
+
+1. **`lsil_c`** — `max(3.0, 3.0 * log10(n) / log10(1000))`
+   Theorem 1 holds for any c > 0; c=3.0 is empirical floor.
+
+2. **`c_max`** — `min(int(log2(n)), int(sqrt(n/2)), 20)`
+   Practical upper bound for K search, derived from n.
+
+3. **`screening_k_values`** — 4 evenly-spaced points from `[c_min, c_max]`
+   Always consistent with actual K search range.
+
+### Fix: `screening_k_values` fallback when outside c_range
+
+Before: fallback to `[c_range[0]]` — only one K screened.
+After: 3 evenly-spaced points from c_range — proper coverage.
+
+### Includes all v1.1.11 changes
+
+Three-path kprototypes in Phase B included.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `api.py` | `AUFSParams.landmark_mode`, wire to `make_sa_reward`, `auto_params()` |
+| `reward.py` | `landmark_mode` param, kcenter/cluster_aware two-path in `lsil_fixed_calibrated` |
+| `controller.py` | screening fallback fix + v1.1.11 three-path kproto |
+| `__init__.py` | export `auto_params` |
+| `pyproject.toml` | version → 1.1.12 |
+
+### Git commit
+```bash
+git add mixclust/api.py \
+        mixclust/aufs/reward.py \
+        mixclust/clustering/controller.py \
+        mixclust/__init__.py \
+        pyproject.toml
+git commit -m "fix+feat: landmark_mode, auto_params, screening fix, v1.1.11 kproto (v1.1.12)
+
+- landmark_mode='kcenter': K-agnostic landmarks, eliminates auto-K bias
+  toward K_hint when using auto_k=True with wide c_min/c_max range
+- landmark_mode='cluster_aware' (default): JDSA paper default,
+  80% central + 20% boundary, optimal BCVD mitigation
+- auto_params(df): self-configuring lsil_c, c_max, screening_k_values,
+  landmark_mode from data characteristics
+- screening_k fallback: evenly-spaced across c_range (not just c_range[0])
+- Includes v1.1.11: three-path kprototypes Phase B"
+git tag v1.1.12
+git push && git push --tags
+```
+
 ## v1.1.11 (patch)
 
 ### Fix: Phase B kprototypes label-cache misalignment
@@ -366,4 +458,5 @@ undetected until post-hoc profile inspection.
 - `|L| = c*sqrt(n)` (Theorem 1), default c=3
 - PhaseACache infrastructure introduced
 - Backward-compatible: `lsil_using_prototypes_gower` still exported
+
 

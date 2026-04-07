@@ -453,6 +453,67 @@ def score_internal(
 
 
 # ================================================================
+# v1.1.11 helpers — merge/split labels for Path B of _run_algo
+# Does NOT touch L-Sil/LNC* computation — only produces labels array.
+# ================================================================
+
+def _merge_labels_to_k(
+    labels: np.ndarray,
+    k_target: int,
+    random_state: int,
+) -> np.ndarray:
+    """Merge smallest cluster pairs until len(unique)==k_target. Deterministic."""
+    labels = labels.copy()
+    while True:
+        uniq, counts = np.unique(labels, return_counts=True)
+        if len(uniq) <= k_target:
+            break
+        order = np.argsort(counts)
+        c_small = uniq[order[0]]
+        c_into  = uniq[order[1]]
+        labels[labels == c_small] = c_into
+    uniq = np.unique(labels)
+    mapping = {old: new for new, old in enumerate(sorted(uniq))}
+    return np.array([mapping[l] for l in labels], dtype=int)
+
+
+def _split_labels_to_k(
+    labels: np.ndarray,
+    k_target: int,
+    X_df: pd.DataFrame,
+    cat_idx: List[int],
+    random_state: int,
+) -> np.ndarray:
+    """Bisect largest cluster via kprototypes(k=2) until len(unique)==k_target."""
+    labels = labels.copy()
+    next_id = int(np.max(labels)) + 1
+    rng_seed = random_state
+    while len(np.unique(labels)) < k_target:
+        uniq, counts = np.unique(labels, return_counts=True)
+        if len(uniq) >= k_target:
+            break
+        c_big = uniq[np.argmax(counts)]
+        idx_big = np.where(labels == c_big)[0]
+        if len(idx_big) < 4:
+            break
+        X_sub = X_df.iloc[idx_big].reset_index(drop=True)
+        try:
+            sub_labels = kprototypes_adapter(
+                X_sub, cat_idx, 2, rng_seed, max_iter=20
+            )
+        except Exception:
+            break
+        if len(np.unique(sub_labels)) < 2:
+            break
+        labels[idx_big[sub_labels == 1]] = next_id
+        next_id += 1
+        rng_seed += 1
+    uniq = np.unique(labels)
+    mapping = {old: new for new, old in enumerate(sorted(uniq))}
+    return np.array([mapping[l] for l in labels], dtype=int)
+
+
+# ================================================================
 # auto_select_algo_k — Phase B evaluation
 # ================================================================
 
@@ -516,10 +577,32 @@ def auto_select_algo_k(
                     X_df, cat_idx, k, random_state, mode=hac_mode
                 )
             elif algo == "kprototypes":
-                return kprototypes_subsample_adapter(
-                    X_df, cat_idx, k, random_state,
-                    subsample_n=6000
-                )
+                # v1.1.11 — three-path strategy
+                # Path A (n<=10K): full kprototypes — accurate, deterministic
+                # Path B (n>10K + cache): derive from labels0 — O(n),
+                #   consistent with L_fixed, fair L-Sil evaluation
+                # Path C (n>10K, no cache): subsample fallback (v1.1.10)
+                _LARGE_N = 10_000
+                n_df = len(X_df)
+                if n_df <= _LARGE_N:
+                    return kprototypes_adapter(X_df, cat_idx, k, random_state)
+                elif (phase_a_cache is not None
+                      and phase_a_cache.available
+                      and phase_a_cache.labels0 is not None):
+                    labels0 = phase_a_cache.labels0
+                    k0 = int(np.max(labels0)) + 1
+                    if k == k0:
+                        return labels0.copy()
+                    elif k < k0:
+                        return _merge_labels_to_k(labels0, k, random_state)
+                    else:
+                        return _split_labels_to_k(
+                            labels0, k, X_df, cat_idx, random_state
+                        )
+                else:
+                    return kprototypes_subsample_adapter(
+                        X_df, cat_idx, k, random_state, subsample_n=6000
+                    )
             elif algo == "kamila":
                 return kamila_subsample_adapter(
                     X_df, cat_idx, k, random_state,
@@ -602,7 +685,13 @@ def auto_select_algo_k(
     if enable_screening and len(active_algorithms) > 1:
         k_screen = [k for k in screening_k_values if k in c_range]
         if not k_screen:
-            k_screen = [list(c_range)[0]]
+            # v1.1.12: fallback evenly-spaced across c_range (not just first)
+            # Covers case where screening_k_values was set for a different c_min/c_max
+            cr = list(c_range)
+            n_pts = min(3, len(cr))
+            import numpy as _np
+            idx = _np.linspace(0, len(cr) - 1, n_pts, dtype=int)
+            k_screen = [cr[i] for i in idx]
 
         screening_scores: Dict[str, List[float]] = {a: [] for a in active_algorithms}
         for algo in active_algorithms:

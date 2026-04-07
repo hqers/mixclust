@@ -21,7 +21,7 @@ __email__   = "33220015@std.stei.itb.ac.id"
 
 # ── Public API ────────────────────────────────────────────────────
 from .pipeline import run_generic_end2end               # noqa: F401
-from .api import run_aufs_samba, AUFSParams             # noqa: F401
+from .api import run_aufs_samba, AUFSParams, auto_params # noqa: F401
 from .metrics.lsil import lsil_using_prototypes_gower  # noqa: F401
 from .metrics.lsil import lsil_using_landmarks          # noqa: F401
 from .metrics.lnc_star import lnc_star                  # noqa: F401
@@ -33,6 +33,7 @@ __all__ = [
     "run_generic_end2end",
     "run_aufs_samba",
     "AUFSParams",
+    "auto_params",
     "lsil_using_prototypes_gower",
     "lsil_using_landmarks",
     "lnc_star",
