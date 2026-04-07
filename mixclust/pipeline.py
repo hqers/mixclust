@@ -53,7 +53,7 @@ def run_generic_end2end(
     id_col: Optional[str] = None,
     drop_cols: Optional[List[str]] = None,
     params: Optional[AUFSParams] = None,
-    n_clusters_hint: int = 3,
+    n_clusters_hint: Optional[int] = None,  # v1.1.12: None = auto (midpoint of c_range)
     verbose: bool = True
 ) -> Dict[str, Any]:
     os.makedirs(outdir, exist_ok=True)
@@ -66,6 +66,20 @@ def run_generic_end2end(
         columns=[c for c in drops if c in df_ready.columns],
         errors="ignore"
     ).copy()
+
+    # v1.1.12: auto-compute n_clusters_hint if not provided
+    # Uses midpoint of [c_min, c_max] — unbiased toward any K,
+    # consistent with the auto-K search range in params.
+    # If landmark_mode="kcenter" (auto for n>10K), hint only affects
+    # labels0, not L_fixed — so midpoint is safe and principled.
+    if n_clusters_hint is None:
+        _p = params if params is not None else AUFSParams()
+        _c_min = getattr(_p, 'c_min', 2)
+        _c_max = getattr(_p, 'c_max', 8)
+        n_clusters_hint = _c_min + (_c_max - _c_min) // 2
+        if verbose:
+            print(f"[pipeline] n_clusters_hint=auto → {n_clusters_hint} "
+                  f"(midpoint of [{_c_min},{_c_max}])")
 
     # ── Data Quality Check — sebelum AUFS-Samba ─────────────────────────
     # Deteksi dan drop fitur zero-variance / near-zero sebelum masuk ke
