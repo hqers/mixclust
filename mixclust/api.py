@@ -495,6 +495,20 @@ def run_aufs_samba(
         if best_cols and best_cols not in cand_subsets:
             cand_subsets = [best_cols] + cand_subsets
 
+        # v1.1.13: dedup — EliteArchive stores sorted key but topk returns
+        # original order, so ['a','b'] and ['b','a'] can both appear.
+        # Remove duplicates while preserving rank order.
+        _seen = set()
+        _deduped = []
+        for _sub in cand_subsets:
+            _key = tuple(sorted(_sub))
+            if _key not in _seen:
+                _seen.add(_key)
+                _deduped.append(_sub)
+        if len(_deduped) < len(cand_subsets) and verbose:
+            print(f"  [Phase B] Dedup: {len(cand_subsets)} → {len(_deduped)} subsets")
+        cand_subsets = _deduped
+
         params_B = AUFSParams(**asdict(params))
         params_B.engine_mode = "C"
         params_B.auto_k = True
