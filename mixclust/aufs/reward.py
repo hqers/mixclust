@@ -39,6 +39,7 @@ from ..metrics.silhouette import full_silhouette_gower_subsample
 from ..core.adaptive import adaptive_landmark_count
 from ..core.landmarks import (
     subsample_and_propagate_labels,
+    select_landmarks_kcenter,
     select_landmarks_cluster_aware,
     cluster_aware_landmarks_on_subsample,
     stratified_landmarks,
