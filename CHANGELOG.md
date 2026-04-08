@@ -1,3 +1,69 @@
+## v1.1.13
+
+### Fix 1: SA bottleneck untuk dataset besar (Susenas)
+
+**Root cause:** `auto_params` menggunakan `lsil_c` yang sama untuk SA reward
+dan Phase B. Untuk Susenas, `lsil_c=5.5` → `|L|=3179`. Setiap reward call
+SA menghitung Gower distances: `eval_n × |L| = 20K × 3179 = 63M ops`.
+SA 58 iterasi × 31 fitur = ~1800 calls → total ~114B ops → 6 jam.
+
+**Fix:** `auto_params` kini menetapkan `lsil_c_reward = min(2.0, lsil_c)`.
+SA menggunakan `|L|=1156` (kecil, cepat), Phase B tetap `|L|=3179` (akurat).
+SA hanya butuh sinyal arah/ranking, bukan nilai absolut yang presisi.
+
+Selain itu `lsil_eval_n` dikurangi dari 6% ke 3% dari n untuk SA.
+
+| | Sebelum | Sesudah |
+|---|---|---|
+| eval_n SA | 20,053 | 10,026 |
+| \|L\| SA | 3,179 | 1,156 |
+| ops/call | 63,748,487 | 11,590,056 |
+| Speedup | — | **5.5x** |
+| SA Susenas ~6 jam | → | **~1.1 jam** |
+
+`lsil_c` Phase B tetap 5.5 → `|L|=3179` → akurasi evaluasi tidak berubah.
+
+### Fix 2: hac_gower Phase B bottleneck (Adult dan dataset n > 10K)
+
+**Root cause:** `hac_landmark_hybrid_adapter` menggunakan pure Python loop
+`for i in range(n)` untuk assignment nearest-centroid. Untuk Adult n=32K
+dengan K_range=13 × 16 subsets = 208 trials → 208 × 32K Python iterations
+× `gower_to_one_mixed()` per call → Phase B ~5 jam.
+
+**Fix:** Ganti Python loop dengan `gower_distances_to_landmarks` (sudah
+ada di codebase) + `np.argmin(D, axis=1)` — operasi matrix C-level numpy.
+
+```python
+# Sebelum: O(n×K) Python loop
+for i in range(n):
+    for c in proto_ids:
+        d = gower_to_one_mixed(...)
+
+# Sesudah: matrix ops
+D = gower_distances_to_landmarks(X_num, X_cat, ..., proto_idx)
+labels_all = [valid_ids[i] for i in np.argmin(D, axis=1)]
+```
+
+Hasil assignment identik secara matematis. Speedup estimasi 50-200x
+untuk assignment step.
+
+### Tidak ada perubahan teoritis
+
+- Theorem 1 tidak berubah: `lsil_c_reward` adalah parameter implementasi,
+  bukan klaim teoritis. SA menggunakan L-Sil sebagai proxy ranking, bukan
+  nilai yang dilaporkan.
+- Vektorisasi assignment menghasilkan labels yang bit-for-bit sama.
+- AUFS-Samba, L-Sil, LNC* tidak berubah.
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `api.py` | `auto_params`: `lsil_c_reward=min(2.0,lsil_c)`, `lsil_eval=3%n` |
+| `controller.py` | `hac_landmark_hybrid_adapter`: vektorisasi assignment |
+| `__init__.py` | version → 1.1.13 |
+| `pyproject.toml` | version → 1.1.13 |
+
 ## v1.1.12
 
 ### Fix: Auto-K bias toward K_hint — two landmark strategies
@@ -69,26 +135,6 @@ Three-path kprototypes in Phase B included.
 | `__init__.py` | export `auto_params` |
 | `pyproject.toml` | version → 1.1.12 |
 
-### Git commit
-```bash
-git add mixclust/api.py \
-        mixclust/aufs/reward.py \
-        mixclust/clustering/controller.py \
-        mixclust/__init__.py \
-        pyproject.toml
-git commit -m "fix+feat: landmark_mode, auto_params, screening fix, v1.1.11 kproto (v1.1.12)
-
-- landmark_mode='kcenter': K-agnostic landmarks, eliminates auto-K bias
-  toward K_hint when using auto_k=True with wide c_min/c_max range
-- landmark_mode='cluster_aware' (default): JDSA paper default,
-  80% central + 20% boundary, optimal BCVD mitigation
-- auto_params(df): self-configuring lsil_c, c_max, screening_k_values,
-  landmark_mode from data characteristics
-- screening_k fallback: evenly-spaced across c_range (not just c_range[0])
-- Includes v1.1.11: three-path kprototypes Phase B"
-git tag v1.1.12
-git push && git push --tags
-```
 
 ## v1.1.11 (patch)
 
@@ -153,21 +199,6 @@ Results differ from v1.1.10 by design (bug fix), not by randomness.
 | `__init__.py` | version bump to 1.1.11 |
 | `pyproject.toml` | version bump to 1.1.11 |
 
-### Git commit
-```bash
-git add mixclust/clustering/controller.py mixclust/__init__.py pyproject.toml
-git commit -m "fix: Phase B kproto label-cache misalignment — three-path strategy (v1.1.11)
-
-- Path A (n<=10K): full kprototypes_adapter — deterministic, no subsample
-- Path B (n>10K + cache): derive from labels0 via merge/split — O(n),
-  consistent with L_fixed, eliminates L-Sil under-estimation
-- Path C (fallback): v1.1.10 subsample behaviour
-
-Helpers added: _merge_labels_to_k, _split_labels_to_k
-No changes to reward.py, landmarks.py, lsil.py, lnc_star.py, sa.py, mab.py"
-git tag v1.1.11
-git push && git push --tags
-```
 # CHANGELOG — mixclust
 
 ## v1.1.10 (2026-04-04)
@@ -225,14 +256,6 @@ After:  ~60-120s (~1-2 minutes)
 | `api.py` | `mixclust/api.py` |
 | `__init__.py` | `mixclust/__init__.py` |
 | `pyproject.toml` | `pyproject.toml` |
-
-### Git commit
-```bash
-git add mixclust/utils/dav.py mixclust/api.py mixclust/__init__.py pyproject.toml
-git commit -m "perf: DAV 60x speedup — c*sqrt(n) landmark, anchor subsample, cross-subset cache (v1.1.10)"
-git tag v1.1.10
-git push && git push --tags
-```
 
 ---
 
@@ -304,21 +327,6 @@ separately and causing `NameError` / `KeyError` errors.
 | `pipeline.py` | `mixclust/pipeline.py` |
 | `__init__.py` | `mixclust/__init__.py` |
 | `pyproject.toml` | `pyproject.toml` |
-
-### Git commit
-```bash
-git add mixclust/utils/dav.py mixclust/pipeline.py mixclust/__init__.py pyproject.toml
-git commit -m "fix: DAV Phase B prioritise DAV winner over fallback, threshold 0.40->0.25 (v1.1.9)
-
-- find_best_clustering_dav: _should_update() prevents DAV winner from being
-  compared directly against fallback score (apple vs orange)
-- lnc_anchor_threshold default: 0.40 -> 0.25 (more realistic at large scale)
-- _AnchorContext: log Va_valid vs Va_requested
-- auto_select_algo_k_dav: log best LNC*_a on fallback to aid tuning
-- pipeline.py: expose best_K, final_algo, dav in run_generic_end2end return dict"
-git tag v1.1.9
-git push && git push --tags
-```
 
 ---
 

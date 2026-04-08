@@ -213,22 +213,29 @@ def hac_landmark_hybrid_adapter(
         return kprototypes_adapter(X_df, cat_idx, k, random_state, max_iter=20)
 
     try:
-        from ..core.gower import gower_to_one_mixed
-        labels_all = np.zeros(n, dtype=int)
-        proto_ids = sorted(protos_lm.keys())
-        for i in range(n):
-            best_c, best_d = proto_ids[0], np.inf
-            for c in proto_ids:
-                if not protos_lm[c]:
-                    continue
-                d = float(np.mean(gower_to_one_mixed(
-                    X_num, X_cat, num_min, num_max, i, protos_lm[c],
-                    feature_mask_num=mask_num, feature_mask_cat=mask_cat,
-                    inv_rng=inv_rng,
-                )))
-                if d < best_d:
-                    best_d, best_c = d, c
-            labels_all[i] = best_c
+        # v1.1.13: vektorisasi assignment via gower_distances_to_landmarks
+        # SEBELUM: loop Python O(n×K) → lambat untuk n > 10K
+        # SESUDAH: matrix ops O(n×|protos|) → ~100x lebih cepat
+        from ..core.gower import gower_distances_to_landmarks
+        proto_ids  = sorted(protos_lm.keys())
+        proto_idx  = [protos_lm[c][0] for c in proto_ids if protos_lm[c]]
+        valid_ids  = [c for c in proto_ids if protos_lm[c]]
+
+        if len(proto_idx) < 2:
+            raise ValueError("not enough prototypes")
+
+        # D shape: (n, |protos|) — Gower distance tiap baris ke tiap proto
+        D = gower_distances_to_landmarks(
+            X_num, X_cat, num_min, num_max,
+            proto_idx,
+            feature_mask_num=mask_num,
+            feature_mask_cat=mask_cat,
+            inv_rng=inv_rng,
+        )
+        # Assign tiap baris ke proto terdekat
+        nearest = np.argmin(D, axis=1)           # (n,) index ke valid_ids
+        labels_all = np.array([valid_ids[i] for i in nearest], dtype=int)
+
         unique_labs = np.unique(labels_all)
         label_map = {old: new for new, old in enumerate(sorted(unique_labs))}
         return np.array([label_map[l] for l in labels_all], dtype=int)

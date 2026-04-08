@@ -928,7 +928,19 @@ def auto_params(
     missing_scale = max(0.5, 1.0 - prof['missing_ratio'])
     sub_n    = min(n, max(2000,  int(0.02 * n * missing_scale)))  # Phase A cluster
     pb_eval  = min(n, max(10000, int(0.10 * n)))                  # Phase B L-Sil eval
-    lsil_eval= min(n, max(5000,  int(0.06 * n)))                  # SA reward eval
+
+    # v1.1.13: cap lsil_eval_n lebih agresif untuk n besar
+    # SA reward menggunakan lsil_eval_n — terlalu besar → SA lambat
+    # SA hanya butuh sinyal arah, bukan presisi tinggi → 3% n cukup
+    lsil_eval = min(n, max(5000, int(0.03 * n)))   # SA reward eval (3%, down from 6%)
+
+    # ── 9b. lsil_c_reward — c khusus untuk SA reward evaluation ──
+    # v1.1.13: pisahkan c untuk SA (cepat) vs Phase B (akurat)
+    # SA reward hanya butuh ranking relatif antar subset, bukan nilai absolut
+    # → c_reward kecil (|L| kecil) → tiap reward call jauh lebih cepat
+    # → lsil_c tetap besar untuk Phase B evaluation (akurasi tinggi)
+    # Cap di 2.0 agar |L|_reward ≈ 2√n — cukup untuk ranking tapi ringan
+    c_reward = round(min(2.0, c_lsil), 1)
 
     # ── 10. sc_lnc_threshold — relax for large n ─────────────────
     # Large n → more heterogeneous → LNC* naturally lower
@@ -944,6 +956,7 @@ def auto_params(
     auto = dict(
         # landmark & K range
         lsil_c             = c_lsil,
+        lsil_c_reward      = c_reward,   # v1.1.13: SA pakai c kecil, Phase B c besar
         c_min              = c_min,
         c_max              = c_max,
         screening_k_values = screening_k,
@@ -977,7 +990,8 @@ def auto_params(
         print(f"[auto_params] n={n:,}  p={p}")
         print(f"  Signals: cat={cat_ratio:.0%}  binary={binary_ratio:.0%}  "
               f"spike={spike_ratio:.0%}  missing={prof['missing_ratio']:.0%}")
-        print(f"  lsil_c={auto['lsil_c']}  |L|={int(auto['lsil_c']*n**0.5):,}  "
+        print(f"  lsil_c={auto['lsil_c']}  |L|_phaseB={int(auto['lsil_c']*n**0.5):,}  "
+              f"lsil_c_reward={auto['lsil_c_reward']}  |L|_SA={int(auto['lsil_c_reward']*n**0.5):,}  "
               f"c_max={auto['c_max']}")
         print(f"  landmark_mode  = {lm_tag}")
         print(f"  lambda         = {auto['cluster_adapter_lambda']}  "
