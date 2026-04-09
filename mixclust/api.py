@@ -894,8 +894,11 @@ def auto_params(
     c_lsil = round(c_lsil, 1)
 
     # ── 2. c_max ─────────────────────────────────────────────────
-    c_max = min(int(math.log2(max(n, 4))), int(math.sqrt(n / 2)), 20)
-    c_max = max(c_max, c_min + 1)
+    # Cap 10: K > 10 hampir tidak pernah interpretatif untuk data survei
+    # maupun UCI benchmark. User bisa override via overrides={'c_max': N}.
+    # Dataset kecil (n < 1500) tidak terpengaruh karena formula log2/sqrt
+    # sudah menghasilkan ≤ 10 secara alami.
+    c_max = min(int(math.log2(max(n, 4))), int(math.sqrt(n / 2)), 10)
 
     # ── 3. screening_k_values — evenly-spaced from c_range ───────
     c_range = list(range(c_min, c_max + 1))

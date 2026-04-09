@@ -490,11 +490,35 @@ def _split_labels_to_k(
     X_df: pd.DataFrame,
     cat_idx: List[int],
     random_state: int,
+    max_split_depth: int = 2,       # v1.1.13: batasi split iteratif
+    subsample_n: int = 6_000,       # v1.1.13: fallback subsample size
 ) -> np.ndarray:
-    """Bisect largest cluster via kprototypes(k=2) until len(unique)==k_target."""
+    """
+    Bisect largest cluster via kprototypes(k=2) until len(unique)==k_target.
+
+    v1.1.13: Dua perbaikan untuk mencegah bottleneck pada n > 10K:
+
+    1. max_split_depth: kalau k_target - k0 <= max_split_depth,
+       pakai kprototypes pada full klaster (akurat, deterministik).
+       Kalau > max_split_depth, fallback ke subsample — cegah O(n×splits)
+       pada n=40K+ dengan k_target jauh di atas k0.
+
+    2. subsample_n: kalau klaster terlalu besar (> subsample_n),
+       kprototypes dijalankan pada subsample klaster tersebut,
+       lalu label di-propagate via nearest-prototype ke seluruh klaster.
+
+    Ini tidak mengubah logika merge/split — hanya mencegah kprototypes
+    full data dijalankan berkali-kali untuk K yang jauh dari k0.
+    """
     labels = labels.copy()
+    n_splits_needed = k_target - (int(np.max(labels)) + 1)
+
+    # Kalau butuh terlalu banyak split → subsample mode dari awal
+    use_subsample = n_splits_needed > max_split_depth
+
     next_id = int(np.max(labels)) + 1
     rng_seed = random_state
+
     while len(np.unique(labels)) < k_target:
         uniq, counts = np.unique(labels, return_counts=True)
         if len(uniq) >= k_target:
@@ -503,18 +527,50 @@ def _split_labels_to_k(
         idx_big = np.where(labels == c_big)[0]
         if len(idx_big) < 4:
             break
+
         X_sub = X_df.iloc[idx_big].reset_index(drop=True)
+
         try:
-            sub_labels = kprototypes_adapter(
-                X_sub, cat_idx, 2, rng_seed, max_iter=20
-            )
+            if use_subsample and len(idx_big) > subsample_n:
+                # Subsample klaster → kprototypes → propagate ke seluruh klaster
+                rng = np.random.default_rng(rng_seed)
+                sub_idx = rng.choice(len(idx_big), size=subsample_n, replace=False)
+                sub_idx.sort()
+                X_sub_s = X_sub.iloc[sub_idx]
+                sub_labels_s = kprototypes_adapter(
+                    X_sub_s, cat_idx, 2, rng_seed, max_iter=20
+                )
+                if len(np.unique(sub_labels_s)) < 2:
+                    break
+                # Nearest prototype assignment untuk seluruh klaster
+                # Cari representasi tiap proto: rata-rata numerik
+                num_cols = [i for i in range(X_sub.shape[1]) if i not in cat_idx]
+                if num_cols:
+                    X_num = X_sub.iloc[:, num_cols].values.astype(float)
+                    proto0_num = X_num[sub_idx[sub_labels_s == 0]].mean(axis=0)
+                    proto1_num = X_num[sub_idx[sub_labels_s == 1]].mean(axis=0)
+                    d0 = np.linalg.norm(X_num - proto0_num, axis=1)
+                    d1 = np.linalg.norm(X_num - proto1_num, axis=1)
+                    sub_labels = (d1 < d0).astype(int)
+                else:
+                    # Semua kategorik → fallback ke subsample langsung
+                    sub_labels = kprototypes_adapter(
+                        X_sub, cat_idx, 2, rng_seed, max_iter=20
+                    )
+            else:
+                # Full cluster kprototypes (max_split_depth kali pertama)
+                sub_labels = kprototypes_adapter(
+                    X_sub, cat_idx, 2, rng_seed, max_iter=20
+                )
         except Exception:
             break
+
         if len(np.unique(sub_labels)) < 2:
             break
         labels[idx_big[sub_labels == 1]] = next_id
         next_id += 1
         rng_seed += 1
+
     uniq = np.unique(labels)
     mapping = {old: new for new, old in enumerate(sorted(uniq))}
     return np.array([mapping[l] for l in labels], dtype=int)
