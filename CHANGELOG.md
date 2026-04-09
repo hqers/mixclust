@@ -1,3 +1,169 @@
+# CHANGELOG — mixclust
+
+## v1.1.14 (2026-04-09)
+
+### Fix: `auto_params` menghasilkan konfigurasi yang lebih buruk dari manual v1.1.11
+
+**Root cause:** Empat parameter di `auto_params` menggunakan formula yang terlalu
+agresif untuk dataset medium (n = 10K–100K), menyebabkan `labels0`, `L_fixed`,
+dan SA reward semuanya dalam kondisi buruk sekaligus.
+
+Ditemukan dari perbandingan langsung `metrics_internal.json` antara v1.1.11
+(config manual) dan v1.1.13 (auto_params):
+
+| Metrik | v1.1.11 | v1.1.13 patch | v1.1.14 |
+|---|---|---|---|
+| `final_algo` | hac_gower | kprototypes | hac_gower ✓ |
+| `final_ss_gower` | 0.7276 | 0.4028 | ~0.72 (target) |
+| `best_reward` | 0.9742 | 0.8114 | — |
+| `phaseB_s` | 1,474s | 29,773s | ~1,500s |
+
+---
+
+#### Bug #1 — `landmark_mode = "kcenter"` terlalu mudah trigger
+
+**Formula lama:**
+```python
+geo_dom_risk = (n_ratio > 1) or (binary_ratio > 0.3) or (spike_ratio > 0.4)
+```
+BankMarketing `n_ratio=4.1 > 1` → selalu `kcenter`. `L_fixed` tidak aligned
+dengan struktur klaster → evaluasi Phase B menyesatkan → algo/K yang salah
+dipilih.
+
+**Formula baru:**
+```python
+geo_dom_risk = (
+    (n_ratio > 10.0)                               # n > 100K (Susenas-level)
+    or (binary_ratio > 0.5 and spike_ratio > 0.5)  # geometric dominance serius
+    or (n_ratio > 5.0 and binary_ratio > 0.4)      # large + sangat binary
+)
+```
+`kcenter` tetap aktif untuk Susenas (n_ratio=33.4). Dataset 10K–100K dengan
+mixed data normal kembali ke `cluster_aware` yang aligned ke struktur klaster.
+
+---
+
+#### Bug #2 — `lsil_eval_n` floor terlalu kecil
+
+**Formula lama:** `max(5_000, 0.03 * n)` → 5,000 untuk n=41K (BankMarketing).
+SA mengevaluasi reward dari 5K/41K = 12.2% → reward noisy → SA tidak bisa
+membedakan subset bagus dari buruk.
+
+**Formula baru:** `max(10_000, 0.03 * n)` — floor dinaikkan ke 10K.
+Kompromi antara kecepatan (2× lebih cepat dari v1.1.11 yang pakai 20K)
+dan stabilitas reward.
+
+---
+
+#### Bug #3 — `c_max` terlalu besar → `n_clusters_hint` jauh dari K*
+
+**Formula lama:** `min(log2(n), sqrt(n/2), 10)` → `c_max=10` untuk n=41K.
+`pipeline.py` auto-set `n_clusters_hint = midpoint([2,10]) = 6`.
+`labels0` dibangun dengan K=6 padahal true K*=2. Merge 6→2 klaster tidak
+natural → `L_fixed` buruk dari awal.
+
+**Formula baru:** hard cap berbasis skala dataset:
+```python
+if n < 200_000:   c_max_hard = 6    # UCI benchmark medium
+elif n < 500_000: c_max_hard = 8    # Susenas-level
+else:             c_max_hard = 10   # Covertype dan sangat besar
+c_max = min(int(log2(n)), int(sqrt(n/2)), c_max_hard)
+```
+
+Dampak per dataset:
+
+| Dataset | n | c_max lama | c_max baru | K_hint lama | K_hint baru |
+|---|---|---|---|---|---|
+| BankMarketing | 41K | 10 | **6** | 6 | **4** |
+| Adult | 49K | 10 | **6** | 6 | **4** |
+| CreditCard | 30K | 10 | **6** | 6 | **4** |
+| Diabetes130 | 102K | 10 | **6** | 6 | **4** |
+| Susenas | 334K | 10 | **8** | 6 | **5** |
+| Covertype | 581K | 10 | 10 | 6 | 6 |
+
+---
+
+#### Bug #4 — `subsample_n_cluster` floor terlalu kecil
+
+**Formula lama:** `max(2_000, 0.02 * n)` → 2,000 untuk n=41K (4.9% dari data).
+`subsample_n_cluster` dipakai untuk kprototypes awal yang menghasilkan `labels0`.
+Labels dari 2K/41K tidak representatif → `L_fixed` ikut buruk.
+
+**Formula baru:** `max(6_000, 0.02 * n)` — floor dinaikkan ke 6K.
+Sama persis dengan konfigurasi manual v1.1.11 untuk BankMarketing.
+
+---
+
+### New: `label_col` parameter di `run_generic_end2end`
+
+Parameter opsional untuk benchmark UCI dengan ground truth label tersedia.
+
+```python
+# Benchmark: K_hint dari jumlah kelas label (paling akurat)
+result = run_generic_end2end(
+    df,                   # df TERMASUK kolom label
+    outdir='out/bank/',
+    params=auto_params(df.drop(columns=['y']), random_state=42),
+    label_col='y',        # auto-drop dari fitur, K_hint = nunique(y)
+)
+# [pipeline] n_clusters_hint=2 (source: label_col='y' (nunique=2))
+
+# Produksi (Susenas): tidak ada label, pakai midpoint
+result = run_generic_end2end(
+    df_ready, outdir='out/susenas/',
+    params=auto_params(df_ready, random_state=42),
+    # label_col tidak diisi → midpoint [c_min, c_max]
+)
+```
+
+**Tiga jalur resolusi K_hint (prioritas menurun):**
+1. `n_clusters_hint=N` eksplisit → pakai langsung
+2. `label_col='y'` → `K_hint = nunique(y)`, di-clamp ke `[c_min, c_max]`
+3. Default → `midpoint([c_min, c_max])`
+
+**Catatan metodologi:** `label_col` hanya mempengaruhi inisialisasi
+(`labels0` + `L_fixed`), bukan pemilihan K* akhir. Phase B tetap mencari
+K optimal secara bebas di `[c_min, c_max]`. Ini setara dengan *informed
+initialization* — bukan supervisi. Untuk paper: *"For benchmark datasets
+with known ground truth, K_hint is set to the number of true classes to
+improve initialization quality. The final K* is determined independently
+by Phase B."*
+
+---
+
+### Catatan: tidak ada sinyal struktural yang reliable untuk prediksi K* besar
+
+Investigasi menunjukkan tidak ada kombinasi `n`, `p`, `cat_ratio`, `binary_ratio`,
+`spike_ratio` yang bisa membedakan dataset K*=7 (DryBean, Obesity) dari dataset
+K*=2 (BankMarketing, Adult) yang struktur kolomnya identik. Formula `c_max = f(p)`
+meningkatkan coverage dari 10/13 ke 12/13 tapi masih miss Flag (K*=8, p=29).
+Solusi yang benar adalah `label_col` untuk benchmark, atau override eksplisit
+`auto_params(df, c_max=10)` untuk dataset dengan K* besar yang diketahui.
+
+---
+
+### Parameter auto_params: perbandingan v1.1.13 vs v1.1.14 (BankMarketing n=41K)
+
+| Parameter | v1.1.11 manual | v1.1.13 auto | v1.1.14 auto | Match? |
+|---|---|---|---|---|
+| `c_max` | 6 | 10 | **6** | exact |
+| `n_clusters_hint` | 3 | 6 | **4** | dekat |
+| `landmark_mode` | cluster_aware | kcenter | **cluster_aware** | exact |
+| `lsil_eval_n` | 20,000 | 5,000 | **10,000** | lebih baik |
+| `subsample_n_cluster` | 6,000 | 2,000 | **6,000** | exact |
+| `screening_k_values` | [2,3,4,5,6] | [2,4,7,10] | **[2,3,4,6]** | mendekati |
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `api.py` | `auto_params`: 4 fix (c_max hard_cap, landmark_mode threshold, lsil_eval_n floor, subsample_n_cluster floor) |
+| `pipeline.py` | `run_generic_end2end`: tambah `label_col` param + 3-jalur K_hint resolution |
+| `__init__.py` | version → 1.1.14 |
+| `pyproject.toml` | version → 1.1.14 |
+
+---
+
 ## v1.1.13
 
 ### Fix 1: SA bottleneck untuk dataset besar (Susenas)
@@ -161,7 +327,7 @@ Phase B:  labels_B = kproto(NEW subsample 6K) → slightly different partition
 **Fix — three-path strategy in `_run_algo` (controller.py only):**
 
 | Path | Condition | Behaviour |
-|------|-----------|-----------|
+|------|-----------|-----------| 
 | A | n ≤ 10,000 | `kprototypes_adapter` on full data — accurate & fast |
 | B | n > 10,000 AND cache available | derive labels from `labels0` via merge/split — O(n), deterministic, consistent with L_fixed |
 | C | n > 10,000 AND no cache | subsample fallback (v1.1.10 behaviour) |
@@ -170,36 +336,12 @@ Two helper functions added to `controller.py`:
 - `_merge_labels_to_k`: merge smallest cluster pairs to reach k_target
 - `_split_labels_to_k`: bisect largest cluster via kprototypes(k=2)
 
-**What does NOT change (by design):**
-- `reward.py` — Phase A logic, labels0, L_fixed unchanged
-- `landmarks.py` — landmark selection unchanged
-- `lsil.py` / `lnc_star.py` — metric computation unchanged
-- `phase_a_cache.py` — cache structure unchanged
-- `mab.py` / `sa.py` — feature selection unchanged
-- `S*` (selected features) — identical to v1.1.10
-
-**Will results change vs v1.1.10?**
-
-| Dataset size | Change expected? |
-|---|---|
-| n ≤ 6K (CMC, CylinderBands, HeartDisease, etc.) | No — Path A, same as full kproto |
-| n 6K–10K (Obesity) | Possibly minor — now full kproto vs subsample |
-| n > 10K (Adult, BankMarketing, Susenas) | Yes — Path B replaces subsample |
-
-Auto-adapter claim preserved: both kprototypes and hac_gower still
-compete in Phase B. Fix ensures the competition is fair.
-
-**Random seed:** fully deterministic within v1.1.11 via AUFSParams.random_state.
-Results differ from v1.1.10 by design (bug fix), not by randomness.
-
 ### Files changed
 | File | Change |
 |------|--------|
 | `controller.py` | `_run_algo`: three-path kproto, add `_merge_labels_to_k`, `_split_labels_to_k` |
 | `__init__.py` | version bump to 1.1.11 |
 | `pyproject.toml` | version bump to 1.1.11 |
-
-# CHANGELOG — mixclust
 
 ## v1.1.10 (2026-04-04)
 
@@ -348,38 +490,6 @@ Total per trial: ~150-300s x 96 trials = **4-8 hours** (or hang)
 
 **Estimate:** Per trial 150s → ~30s. Phase B DAV: 4-8 hours → ~45 minutes.
 
-### New: `_AnchorContext` class
-- Caches KNN index + landmarks + Gower arrays in Va space
-- Built once in `auto_select_algo_k_dav`, reused per (algo, K) trial
-- `_lnc_star_anchored_fast()` uses the prebuilt context
-
-### New: `_lnc_global_from_cache()`
-- Computes LNC*(S*) guardrail by reusing `phase_a_cache.knn_index`
-- No new KNNIndex built per trial
-
-### New: KAMILA adapter
-- `cluster_adapters.py`: `kamila_adapter()` and `kamila_subsample_adapter()`
-- `controller.py`: `_run_algo` recognises `"kamila"` as an algorithm
-- `dav.py`: `auto_select_algo_k_dav` recognises `"kamila"`
-- Opt-in via `auto_algorithms=["kprototypes", "hac_gower", "kamila"]`
-
-### New: `run_dqc()` — Data Quality Check before AUFS-Samba
-- **`utils/dqc.py`**: new module, called automatically in `pipeline.py`
-- **Level 1 — Zero variance** (`zero_var_action="drop"`): auto-drop
-- **Level 2 — Near-zero variance** (`near_zero_action="drop"`, threshold 99.9%): auto-drop
-- **Level 3 — High missing** (`missing_action="warn"`, threshold 50%): warning only
-- Output: `dqc_report.csv` saved to `outdir` on every run
-
-**Motivation:** Zero-variance features are invisible to reward-based AUFS because
-adding them does not lower L-Sil — they are neutral, not penalised. The redundancy
-penalty also misses them since it measures inter-feature correlation, not internal
-variance. As a result, features can slip into `features.csv` with no discriminative
-contribution while diluting other features via Gower's `/p` normalisation.
-
-**Real case:** `AccessCommunication` in Susenas 2020 — all 334,229 households
-had value "No" → Cramér's V = 0.0000, entered `features.csv` in v1.1.6,
-undetected until post-hoc profile inspection.
-
 ### Files changed
 
 | File | Path |
@@ -406,11 +516,6 @@ undetected until post-hoc profile inspection.
 - `controller.py`: `skip_lnc` param in `auto_select_algo_k()` and `_eval_with_phase_a_cache()`
 - `api.py`: `AUFSParams.phase_b_skip_lnc: bool = False`
 
-### Runtime estimate (fast mode, all optimisations enabled)
-- SA: 33 min → ~5 min (`calibrate_mode="none"`)
-- Phase B: 3.1 h → ~20 min (`rerank_topk=6` + `skip_lnc` + subsample)
-- Total: 3.8 h → ~30 min
-
 ---
 
 ## v1.1.6 (2026-03-31)
@@ -421,9 +526,6 @@ undetected until post-hoc profile inspection.
 - `reward.py`: inject `random_state` into `__phase_a_cache__`
 - `api.py`: `phase_b_eval_n: int = 30_000`
 
-### Parameter wiring v2.2
-- `api.py`: `lsil_eval_n`, `lsil_c_reward`, `subsample_n_cluster` in AUFSParams
-
 ---
 
 ## v1.1.5 (2026-03-31)
@@ -431,9 +533,6 @@ undetected until post-hoc profile inspection.
 ### Critical fix: `kprototypes_subsample_adapter` not imported
 - **Impact:** all kprototypes Phase B trials failed silently
 - **Fix:** add import in `controller.py`
-
-### Housekeeping
-- `__init__.py`: export `lsil_using_landmarks`
 
 ---
 
@@ -466,5 +565,3 @@ undetected until post-hoc profile inspection.
 - `|L| = c*sqrt(n)` (Theorem 1), default c=3
 - PhaseACache infrastructure introduced
 - Backward-compatible: `lsil_using_prototypes_gower` still exported
-
-

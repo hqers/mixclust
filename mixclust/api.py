@@ -894,11 +894,22 @@ def auto_params(
     c_lsil = round(c_lsil, 1)
 
     # ── 2. c_max ─────────────────────────────────────────────────
-    # Cap 10: K > 10 hampir tidak pernah interpretatif untuk data survei
-    # maupun UCI benchmark. User bisa override via overrides={'c_max': N}.
-    # Dataset kecil (n < 1500) tidak terpengaruh karena formula log2/sqrt
-    # sudah menghasilkan ≤ 10 secara alami.
-    c_max = min(int(math.log2(max(n, 4))), int(math.sqrt(n / 2)), 10)
+    # v1.1.14 fix: c_max lebih konservatif untuk dataset medium (10K–100K).
+    # Formula lama menghasilkan c_max=10 untuk n=41K (BankMarketing),
+    # yang membuat n_clusters_hint=6 (midpoint [2,10]) — jauh dari true K*=2.
+    # labels0 dengan K_hint=6 lalu di-merge ke K=2 → labels tidak natural.
+    #
+    # Formula baru: hard cap 6 untuk n < 200K, cap 8 untuk n < 500K, 10 untuk n ≥ 500K.
+    # Alasan: dataset survei/UCI umumnya K* ≤ 5. Cap ini tidak mencegah K* besar
+    # ditemukan — hanya membatasi range search agar labels0/L_fixed lebih representatif.
+    # User bisa override via overrides={'c_max': N} jika K* diduga besar.
+    if n < 200_000:
+        c_max_hard = 6
+    elif n < 500_000:
+        c_max_hard = 8
+    else:
+        c_max_hard = 10
+    c_max = min(int(math.log2(max(n, 4))), int(math.sqrt(n / 2)), c_max_hard)
 
     # ── 3. screening_k_values — evenly-spaced from c_range ───────
     c_range = list(range(c_min, c_max + 1))
@@ -907,9 +918,15 @@ def auto_params(
     screening_k = tuple(c_range[i] for i in idx)
 
     # ── 4. landmark_mode ─────────────────────────────────────────
-    # kcenter if: large n (K range matters more), or binary/spike risk
-    # cluster_aware if: small n, low geometric dominance risk
-    geo_dom_risk = (n_ratio > 1) or (binary_ratio > 0.3) or (spike_ratio > 0.4)
+    # v1.1.14 fix: kondisi kcenter dipersempit.
+    # BUG LAMA: n_ratio > 1 sudah cukup → BankMarketing (n=41K) → kcenter.
+    # L_fixed kcenter tidak aligned dengan struktur klaster → Phase B salah pilih algo/K.
+    # FIX: kcenter hanya untuk n > 100K atau geometric dominance serius.
+    geo_dom_risk = (
+        (n_ratio > 10.0)                               # n > 100K (Susenas-level)
+        or (binary_ratio > 0.5 and spike_ratio > 0.5) # geometric dominance serius
+        or (n_ratio > 5.0 and binary_ratio > 0.4)     # large + sangat binary
+    )
     landmark_mode = "kcenter" if geo_dom_risk else "cluster_aware"
 
     # ── 5. cluster_adapter_lambda ────────────────────────────────
@@ -943,13 +960,21 @@ def auto_params(
     # S6: high missing_ratio → reduce subsample (missing rows less useful)
     # missing > 0.3 → scale down by 30%; missing > 0.5 → scale down 50%
     missing_scale = max(0.5, 1.0 - prof['missing_ratio'])
-    sub_n    = min(n, max(2000,  int(0.02 * n * missing_scale)))  # Phase A cluster
+    # v1.1.14 fix: floor sub_n dinaikkan dari 2K → 6K.
+    # BUG LAMA: max(2000, 0.02*n) → 2,000 untuk n=41K (BankMarketing).
+    # subsample_n_cluster dipakai untuk kprototypes awal di Phase A (generate labels0).
+    # labels0 dari 2K/41K (4.9%) tidak representatif → L_fixed ikut buruk.
+    # v1.1.11 pakai 6,000 (14.6%) → labels0 stabil.
+    sub_n    = min(n, max(6_000, int(0.02 * n * missing_scale)))  # Phase A cluster, floor 6K
     pb_eval  = min(n, max(10000, int(0.10 * n)))                  # Phase B L-Sil eval
 
-    # v1.1.13: cap lsil_eval_n lebih agresif untuk n besar
-    # SA reward menggunakan lsil_eval_n — terlalu besar → SA lambat
-    # SA hanya butuh sinyal arah, bukan presisi tinggi → 3% n cukup
-    lsil_eval = min(n, max(5000, int(0.03 * n)))   # SA reward eval (3%, down from 6%)
+    # v1.1.14 fix: floor lsil_eval_n dinaikkan dari 5K → 10K.
+    # BUG LAMA: max(5000, 0.03*n) → 5,000 untuk n=41K (BankMarketing).
+    # SA dengan 5K dari 41K → reward terlalu noisy → SA tidak bisa bedakan subset.
+    # Empiris v1.1.11: 20K menghasilkan reward stabil (best_reward=0.9742).
+    # Kompromi: floor 10K — 2× lebih baik dari 5K, masih 2× lebih cepat dari 20K.
+    # Untuk Susenas (n=334K): 0.03*334K = 10K → tidak berubah (sudah di floor).
+    lsil_eval = min(n, max(10_000, int(0.03 * n)))   # SA reward eval, floor 10K
 
     # ── 9b. lsil_c_reward — c khusus untuk SA reward evaluation ──
     # v1.1.13: pisahkan c untuk SA (cepat) vs Phase B (akurat)

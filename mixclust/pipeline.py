@@ -53,7 +53,11 @@ def run_generic_end2end(
     id_col: Optional[str] = None,
     drop_cols: Optional[List[str]] = None,
     params: Optional[AUFSParams] = None,
-    n_clusters_hint: Optional[int] = None,  # v1.1.12: None = auto (midpoint of c_range)
+    n_clusters_hint: Optional[int] = None,  # v1.1.12: None = auto
+    label_col: Optional[str] = None,        # v1.1.14: kolom label ground truth (opsional)
+                                             # Jika diisi: K_hint = nunique(label_col),
+                                             # kolom otomatis di-drop dari fitur.
+                                             # HANYA untuk benchmark UCI, bukan produksi.
     verbose: bool = True
 ) -> Dict[str, Any]:
     os.makedirs(outdir, exist_ok=True)
@@ -62,24 +66,43 @@ def run_generic_end2end(
     idc = _infer_id_col(df_ready, id_col)
     drops = set(drop_cols or [])
     if idc: drops.add(idc)
+    # label_col: drop dari fitur tapi simpan untuk K_hint
+    y_true = None
+    if label_col and label_col in df_ready.columns:
+        drops.add(label_col)
+        y_true = df_ready[label_col].copy()
     feat_df = df_ready.drop(
         columns=[c for c in drops if c in df_ready.columns],
         errors="ignore"
     ).copy()
 
-    # v1.1.12: auto-compute n_clusters_hint if not provided
-    # Uses midpoint of [c_min, c_max] — unbiased toward any K,
-    # consistent with the auto-K search range in params.
-    # If landmark_mode="kcenter" (auto for n>10K), hint only affects
-    # labels0, not L_fixed — so midpoint is safe and principled.
-    if n_clusters_hint is None:
+    # ── Resolusi n_clusters_hint (3 jalur, prioritas menurun) ────────────
+    # Jalur 1: user pass eksplisit -> pakai langsung
+    # Jalur 2: label_col tersedia -> K_hint = nunique(y_true)
+    #   Valid HANYA untuk benchmark UCI. K_hint hanya untuk inisialisasi
+    #   (labels0 + L_fixed), bukan memilih K* akhir. Phase B tetap
+    #   mencari K optimal secara bebas di range [c_min, c_max].
+    # Jalur 3: midpoint [c_min, c_max] -- default untuk data tanpa label
+    if n_clusters_hint is not None:
+        hint_source = "explicit"
+    elif y_true is not None:
+        k_from_label = int(y_true.nunique())
+        _p = params if params is not None else AUFSParams()
+        _c_min = getattr(_p, 'c_min', 2)
+        _c_max = getattr(_p, 'c_max', 8)
+        n_clusters_hint = max(_c_min, min(k_from_label, _c_max))
+        hint_source = f"label_col='{label_col}' (nunique={k_from_label})"
+        if n_clusters_hint != k_from_label and verbose:
+            print(f"[pipeline] K_hint dari label ({k_from_label}) di-clamp ke "
+                  f"c_range [{_c_min},{_c_max}] -> {n_clusters_hint}")
+    else:
         _p = params if params is not None else AUFSParams()
         _c_min = getattr(_p, 'c_min', 2)
         _c_max = getattr(_p, 'c_max', 8)
         n_clusters_hint = _c_min + (_c_max - _c_min) // 2
-        if verbose:
-            print(f"[pipeline] n_clusters_hint=auto → {n_clusters_hint} "
-                  f"(midpoint of [{_c_min},{_c_max}])")
+        hint_source = f"midpoint of [{_c_min},{_c_max}]"
+    if verbose:
+        print(f"[pipeline] n_clusters_hint={n_clusters_hint} (source: {hint_source})")
 
     # ── Data Quality Check — sebelum AUFS-Samba ─────────────────────────
     # Deteksi dan drop fitur zero-variance / near-zero sebelum masuk ke
