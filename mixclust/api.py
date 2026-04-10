@@ -978,7 +978,9 @@ def auto_params(
     sa_iters = max(30, min(100, int(50 * (1 + 0.3 * entropy_r))))
 
     # ── 8. lsil_topk — scale with K range ────────────────────────
-    lsil_topk = max(2, min(5, c_max - c_min))
+    # v1.1.16 fix: cap di 3. lsil_topk=4 (v1.1.15) menyebabkan SA 2.7x
+    # lebih lambat tanpa peningkatan kualitas untuk dataset ≤100K.
+    lsil_topk = max(2, min(3, c_max - c_min))
 
     # ── 9. Subsample sizes — proportional to n ───────────────────
     # S6: high missing_ratio → reduce subsample (missing rows less useful)
@@ -990,23 +992,32 @@ def auto_params(
     # labels0 dari 2K/41K (4.9%) tidak representatif → L_fixed ikut buruk.
     # v1.1.11 pakai 6,000 (14.6%) → labels0 stabil.
     sub_n    = min(n, max(6_000, int(0.02 * n * missing_scale)))  # Phase A cluster, floor 6K
-    pb_eval  = min(n, max(10000, int(0.10 * n)))                  # Phase B L-Sil eval
+    pb_eval  = min(n, max(30_000, int(0.10 * n)))  # Phase B L-Sil eval, floor 30K
+    # v1.1.16 fix: floor dinaikkan 10K → 30K.
+    # Dari eksperimen: dengan subset kandidat yang benar (dari lsil_eval=20K),
+    # pb_eval=30K diperlukan agar Phase B mengevaluasi secara akurat.
+    # Untuk dataset kecil (n<30K): min(n, 30K) = n → tidak ada efek.
 
-    # v1.1.14 fix: floor lsil_eval_n dinaikkan dari 5K → 10K.
-    # BUG LAMA: max(5000, 0.03*n) → 5,000 untuk n=41K (BankMarketing).
-    # SA dengan 5K dari 41K → reward terlalu noisy → SA tidak bisa bedakan subset.
-    # Empiris v1.1.11: 20K menghasilkan reward stabil (best_reward=0.9742).
-    # Kompromi: floor 10K — 2× lebih baik dari 5K, masih 2× lebih cepat dari 20K.
-    # Untuk Susenas (n=334K): 0.03*334K = 10K → tidak berubah (sudah di floor).
-    lsil_eval = min(n, max(10_000, int(0.03 * n)))   # SA reward eval, floor 10K
+    # v1.1.16 fix: floor lsil_eval_n dinaikkan 10K → 20K.
+    # Dari 4 run BankMarketing: lsil_eval=20K diperlukan agar SA menemukan
+    # kandidat subset yang benar. lsil_eval=10K → SA menemukan subset X1 yang
+    # tidak optimal, Phase B tidak bisa memperbaiki ini.
+    # lsil_eval=20K → SA menemukan subset X2 yang lebih baik → SS-Gower 0.73.
+    # Untuk dataset kecil (n<20K): min(n, 20K) = n → tidak ada efek.
+    lsil_eval = min(n, max(20_000, int(0.03 * n)))   # SA reward eval, floor 20K
 
     # ── 9b. lsil_c_reward — c khusus untuk SA reward evaluation ──
-    # v1.1.13: pisahkan c untuk SA (cepat) vs Phase B (akurat)
-    # SA reward hanya butuh ranking relatif antar subset, bukan nilai absolut
-    # → c_reward kecil (|L| kecil) → tiap reward call jauh lebih cepat
-    # → lsil_c tetap besar untuk Phase B evaluation (akurasi tinggi)
-    # Cap di 2.0 agar |L|_reward ≈ 2√n — cukup untuk ranking tapi ringan
-    c_reward = round(min(2.0, c_lsil), 1)
+    # v1.1.16 fix: threshold berbasis n.
+    #
+    # ROOT CAUSE (dari 4 run BankMarketing + Adult):
+    # lsil_c_reward=2.0 untuk n≤100K → SA pakai |L_SA| berbeda dari Phase B.
+    # Inkonsisensi ini menyebabkan subset SA tidak optimal di Phase B.
+    # Solusi: lsil_c_reward=None untuk n≤100K → SA dan Phase B pakai L yang sama.
+    # Susenas (n>100K) tetap pakai 2.0 → speedup SA terjaga.
+    if n <= 100_000:
+        c_reward = None   # SA konsisten dengan Phase B → kualitas subset terjaga
+    else:
+        c_reward = round(min(2.0, c_lsil), 1)  # speedup untuk dataset besar
 
     # ── 10. sc_lnc_threshold — relax for large n ─────────────────
     # Large n → more heterogeneous → LNC* naturally lower

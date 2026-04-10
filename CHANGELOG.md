@@ -1,5 +1,149 @@
 # CHANGELOG — mixclust
 
+## v1.1.16 (2026-04-10)
+
+### Fix: `lsil_c_reward` threshold berbasis n — konsistensi SA vs Phase B
+
+**Root cause** — dikonfirmasi dari eksperimen Adult (J=nan) dan analisis 4 run BankMarketing:
+
+Untuk n ≤ 100K, `lsil_c_reward=2.0` menyebabkan SA menggunakan landmark
+yang berbeda dari Phase B. Inkonsisensi ini membuat subset yang dipilih SA
+tidak optimal saat dievaluasi Phase B.
+
+**Fix:**
+```python
+if n <= 100_000:
+    c_reward = None   # SA pakai landmark yang sama dengan Phase B
+else:
+    c_reward = round(min(2.0, c_lsil), 1)  # speedup untuk n > 100K
+```
+
+| Dataset | n | c_reward lama | c_reward baru | |L_SA| == |L_PB|? |
+|---|---|---|---|---|
+| BankMarketing | 41K | 2.0 | **None** | ✓ konsisten |
+| Adult | 49K | 2.0 | **None** | ✓ konsisten |
+| Susenas | 334K | 2.0 | 2.0 | speedup tetap |
+
+---
+
+### Fix: `lsil_eval_n` floor dinaikkan 10K → 20K
+
+Dari eksperimen: `lsil_eval=10K` menyebabkan SA menemukan kandidat subset
+yang salah. `lsil_eval=20K` diperlukan agar SA menemukan subset yang benar,
+dan hasilnya baru bisa diperbaiki oleh Phase B.
+
+Untuk dataset kecil (n < 20K): `min(n, 20K) = n` → tidak ada efek.
+
+---
+
+### Fix: `phase_b_eval_n` floor dinaikkan 10K → 30K
+
+Dari eksperimen 4 run BankMarketing:
+- `pb_eval=10K` dengan subset benar (lsil_eval=20K) → SS-Gower 0.54
+- `pb_eval=30K` dengan subset benar → SS-Gower **0.73** (identik v1.1.11)
+
+Phase B perlu evaluasi yang cukup akurat untuk memilih pemenang yang benar
+dari subset kandidat yang sudah benar.
+
+Untuk dataset kecil (n < 30K): `min(n, 30K) = n` → tidak ada efek.
+
+---
+
+### Fix: `lsil_topk` cap di 3
+
+`lsil_topk=4` (v1.1.15) menyebabkan SA 2.7× lebih lambat dari v1.1.11
+tanpa peningkatan kualitas untuk dataset ≤ 100K. Kembali ke cap 3.
+
+---
+
+### Fix: all-numeric subset di Phase B menghasilkan `J=nan`
+
+**Root cause:** `find_best_clustering_from_subsets` di `controller.py` punya
+fallback khusus untuk subset tanpa kolom kategorik (`cat_idx=[]`). Fallback
+ini menjalankan KMeans tapi menetapkan `score=nan, score_adj=nan` — subset
+ini tidak pernah bisa menang di Phase B meski kualitasnya mungkin baik.
+
+Untuk Adult, SA memilih subset all-numeric (`age`, `Education-num`, dll)
+yang valid secara klaster tapi di-skip di Phase B dengan `J=nan`.
+
+**Fix:** Subset all-numeric sekarang dievaluasi via `auto_select_algo_k`
+dengan `cat_idx=[]` — KMeans tetap dipakai tapi dengan evaluasi L-Sil
+yang proper via cache Phase A.
+
+```python
+# Sebelum: hardcode kmeans + score=nan
+if len(cat_idx_subset) == 0:
+    km = KMeans(n_clusters=params.c_min, ...)
+    current = {"algo": "kmeans", ..., "score": np.nan, "score_adj": np.nan}
+
+# Sesudah: auto_select_algo_k dengan cat_idx=[]
+if len(cat_idx_subset) == 0:
+    current = auto_select_algo_k(X_df=df_subset, cat_idx=[], ...)
+```
+
+---
+
+### Konfirmasi dari eksperimen Obesity (n=2,111)
+
+Obesity native v1.1.15 = Obesity force (lsil_eval=20K, pb_eval=30K):
+- SS-Gower identik: **0.5643**
+- best_reward identik: **0.9273**
+
+Ini mengkonfirmasi `min(n, floor)` bekerja dengan benar — untuk dataset
+kecil (n < floor), semua parameter di-clamp ke n sehingga force tidak
+berpengaruh sama sekali.
+
+Bonus: v1.1.15 lebih baik dari v1.1.11 untuk Obesity (SS 0.56 vs 0.28),
+menunjukkan perbaikan di versi sebelumnya benar-benar membantu dataset kecil.
+
+---
+
+### Fix: DQC `disguised_cat_action` default berubah dari `'cast'` ke `'warn'`
+
+ `disguised_cat_action` default berubah dari `'cast'` ke `'warn'`
+
+Sebelumnya default `'cast'` menyebabkan kolom seperti `OccupationHeadSector`
+(integer kode pekerjaan) otomatis di-cast ke `category` tanpa sepengetahuan user.
+Default kini diubah ke `'warn'` — DQC hanya memberi peringatan, tidak mengubah dtype.
+
+```
+[DQC] ⚠️  OccupationHeadSector  | disguised_categorical | nunique=9 | action=warn
+[DQC] disguised_categorical: 2 kolom terdeteksi: ['OccupationHeadSector', 'edu_level']
+[DQC] Kolom-kolom ini TIDAK di-cast (disguised_cat_action='warn').
+[DQC] Jika kolom tersebut memang kategorik, cast secara eksplisit di notebook:
+[DQC]   df['nama_kolom'] = df['nama_kolom'].astype('category')
+[DQC] Atau gunakan explicit_cat_cols=['kolom1', ...] di run_dqc()
+[DQC] Atau set disguised_cat_action='cast' untuk konversi otomatis.
+```
+
+**Tiga cara menangani kolom yang terdeteksi:**
+
+```python
+# Cara 1: cast manual di notebook (paling eksplisit, direkomendasikan)
+df['OccupationHeadSector'] = df['OccupationHeadSector'].astype('category')
+
+# Cara 2: explicit_cat_cols di run_generic_end2end
+result = run_generic_end2end(df, outdir='out/', ...)
+# DQC dipanggil otomatis — pass via auto_params atau override pipeline
+
+# Cara 3: aktifkan auto-cast (perilaku v1.1.13 lama)
+# Di notebook sebelum run:
+from mixclust.utils.dqc import run_dqc
+df_clean, dropped, report = run_dqc(df, disguised_cat_action='cast')
+```
+
+
+---
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `api.py` | `auto_params`: `lsil_c_reward` threshold n≤100K; floor `lsil_eval_n` 20K; floor `phase_b_eval_n` 30K; cap `lsil_topk=3` |
+| `controller.py` | `find_best_clustering_from_subsets`: all-numeric subset pakai `auto_select_algo_k` bukan hardcode kmeans+nan |
+| `__init__.py` | version → 1.1.16 |
+| `pyproject.toml` | version → 1.1.16 |
+
 ## v1.1.15 (2026-04-10)
 
 ### Fix: `lsil_c` terlalu besar untuk dataset medium (n ≤ 100K)
@@ -89,6 +233,7 @@ Setelah fix, Skenario B (DAV aktif) akan menampilkan `lnc_anchor` dan
 
 | File | Change |
 |---|---|
+| `dqc.py` | default `disguised_cat_action` → `'warn'`; pesan warning lebih informatif |
 | `api.py` | `auto_params`: fix `lsil_c` threshold n≤100K; tambah `phase_b_result` ke `info` |
 | `pipeline.py` | return dict: tambah `final_ss_gower` dan `best_reward` |
 | `__init__.py` | version → 1.1.15 |

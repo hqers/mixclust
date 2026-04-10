@@ -960,20 +960,28 @@ def find_best_clustering_from_subsets(
         cat_idx_subset = cat_cols_to_index(df_subset, cat_cols_subset)
 
         if len(cat_idx_subset) == 0:
-            from sklearn.cluster import KMeans
-            km = KMeans(
-                n_clusters=params.c_min,
-                random_state=params.random_state, n_init=10
+            # v1.1.16 fix: all-numeric subset — jalankan auto_select_algo_k
+            # dengan cat_idx=[] bukan hardcode kmeans dengan score=nan.
+            # Score=nan menyebabkan J=nan → subset tidak pernah menang
+            # meski kualitasnya bisa bagus (Adult: 'age','Education-num',dll).
+            # auto_select_algo_k dengan cat_idx=[] akan memilih kmeans
+            # secara internal tapi dengan evaluasi L-Sil via cache yang proper.
+            current = auto_select_algo_k(
+                X_df=df_subset,
+                cat_idx=[],
+                algorithms=algorithms,
+                c_range=c_range,
+                phase_a_cache=phase_a_cache,
+                hac_mode=hac_mode,
+                lambda_weight=lambda_weight,
+                lnc_k=getattr(params, 'lnc_k', 20),
+                lnc_alpha=getattr(params, 'lnc_alpha', 0.7),
+                lsil_topk=getattr(params, 'lsil_topk', 3),
+                enable_screening=getattr(params, 'enable_screening', True),
+                screening_k_values=getattr(params, 'screening_k_values', (2, 3, 4)),
+                random_state=params.random_state,
+                skip_lnc=getattr(params, 'phase_b_skip_lnc', False),
             )
-            labels = km.fit_predict(
-                df_subset.select_dtypes(
-                    exclude=['object', 'category', 'bool']
-                ).values
-            )
-            current = {
-                "algo": "kmeans", "k": params.c_min,
-                "labels": labels, "score": np.nan, "score_adj": np.nan,
-            }
         else:
             current = auto_select_algo_k(
                 X_df=df_subset,
