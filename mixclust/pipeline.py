@@ -321,7 +321,10 @@ def run_generic_end2end(
         "summary_xlsx_path": xl_path,
         "runtime_s": excel_row["runtime_s"],
         # ── v1.1.9: expose key metrics langsung agar tidak perlu buka JSON ──
-        "best_K":     metrics.get("best_K"),
-        "final_algo": metrics.get("final_algo"),
-        "dav":        metrics.get("dav"),        # None jika DAV tidak aktif
+        # ── v1.1.15: tambah final_ss_gower dan best_reward ──
+        "best_K":          metrics.get("best_K"),
+        "final_algo":      metrics.get("final_algo"),
+        "final_ss_gower":  metrics.get("final_ss_gower"),   # fix: sebelumnya tidak di-expose
+        "best_reward":     metrics.get("best_reward"),       # fix: sebelumnya tidak di-expose
+        "dav":             metrics.get("dav"),               # None jika DAV tidak aktif
     }

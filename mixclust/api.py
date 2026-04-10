@@ -674,8 +674,17 @@ def run_aufs_samba(
             "hac_mode_used": params.hac_mode,
             "composite_lambda": params.cluster_adapter_lambda,
             "screening_enabled": params.enable_screening,
-            "cache_hit": phase_a_cache.available,       # ← BARU
-            "n_landmarks_reused": phase_a_cache.n_landmarks,  # ← BARU
+            "cache_hit": phase_a_cache.available,
+            "n_landmarks_reused": phase_a_cache.n_landmarks,
+        },
+
+        # v1.1.15 fix: expose finalB result ke pipeline.py
+        # pipeline.py membaca info.get("phase_b_result", {}) untuk dav_applied,
+        # lnc_anchor, lnc_global, anchor_cols — tapi key ini tidak pernah diisi.
+        # Akibat: dav=null di metrics_internal.json meski DAV berjalan sukses.
+        "phase_b_result": {
+            k: v for k, v in (finalB or {}).items()
+            if k not in ("labels", "all_run_history")
         },
     }
 
@@ -889,9 +898,24 @@ def auto_params(
 
     c_min = overrides.get('c_min', 2)
 
-    # ── 1. lsil_c — log-proportional, floor 3.0 (Theorem 1) ─────
-    c_lsil = max(3.0, 3.0 * math.log10(max(n, 10)) / math.log10(1000))
-    c_lsil = round(c_lsil, 1)
+    # ── 1. lsil_c — log-proportional dengan threshold n ─────────
+    # v1.1.15 fix: pisahkan lsil_c untuk dataset medium vs besar.
+    #
+    # ROOT CAUSE (ditemukan dari 4 run BankMarketing):
+    # lsil_c=4.6 (n=41K) → |L_PB|=933, tapi lsil_c_reward=2.0 → |L_SA|=405.
+    # SA "melihat" landscape dengan 405 landmark, Phase B mengevaluasi dengan 933.
+    # Inkonsisensi ini menyebabkan subset yang dipilih SA tidak optimal di Phase B.
+    # lsil_c=3.0 → |L_PB|=608 → konsisten dengan v1.1.11, SS-Gower kembali 0.73.
+    #
+    # Susenas (n=334K) justru BUTUH lsil_c=5.5 (|L_PB|=3181) untuk SS-Gower tinggi —
+    # dataset besar dan heterogen butuh lebih banyak landmark agar evaluasi akurat.
+    #
+    # Solusi: floor 3.0 untuk n ≤ 100K, log-proportional untuk n > 100K.
+    # Threshold 100K adalah empirical breakpoint dari 4 run (41K bad, 334K good).
+    if n <= 100_000:
+        c_lsil = 3.0
+    else:
+        c_lsil = round(max(3.0, 3.0 * math.log10(max(n, 10)) / math.log10(1000)), 1)
 
     # ── 2. c_max ─────────────────────────────────────────────────
     # v1.1.14 fix: c_max lebih konservatif untuk dataset medium (10K–100K).

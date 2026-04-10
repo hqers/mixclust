@@ -1,5 +1,99 @@
 # CHANGELOG — mixclust
 
+## v1.1.15 (2026-04-10)
+
+### Fix: `lsil_c` terlalu besar untuk dataset medium (n ≤ 100K)
+
+**Root cause** — ditemukan dari 4 run eksperimental BankMarketing:
+
+| Run | `lsil_c` | `phase_b_eval_n` | SS-Gower |
+|---|---|---|---|
+| v1.1.11 manual | 3.0 | 30K | **0.7276** ✓ |
+| v1.1.14 auto | 4.6 | 10K | 0.4604 ✗ |
+| override lsil_c=3 | 3.0 | 30K | **0.7276** ✓ |
+| pb_eval=30K only | 4.6 | 30K | 0.4604 ✗ |
+
+Run ke-4 membuktikan `phase_b_eval_n` bukan penyebab — SS-Gower tetap 0.46
+meski `phase_b_eval_n` dinaikkan ke 30K. Penyebabnya murni `lsil_c=4.6`.
+
+**Mekanisme:** `lsil_c` menentukan `|L_PB|` — jumlah landmark di Phase B.
+Dengan `lsil_c=4.6`, `|L_PB|=933` tapi `lsil_c_reward=2.0` → `|L_SA|=405`.
+SA "melihat" landscape dengan 405 landmark, Phase B mengevaluasi dengan 933
+yang berbeda posisinya. Inkonsisensi ini menyebabkan subset yang dipilih SA
+tidak optimal di landscape Phase B → SS-Gower turun drastis.
+
+Susenas (n=334K) justru *butuh* `lsil_c=5.5` (`|L_PB|=3181`) untuk
+SS-Gower tinggi — dataset besar dan heterogen butuh lebih banyak landmark
+agar evaluasi Phase B akurat. Ini dikonfirmasi dari run Susenas yang
+menghasilkan SS-Gower tertinggi yang pernah dicapai (0.538 vs 0.252 baseline).
+
+**Fix di `auto_params`:**
+```python
+# Sebelum (v1.1.14): selalu log-proportional
+c_lsil = max(3.0, 3.0 * log10(n) / log10(1000))  # 4.6 untuk n=41K
+
+# Sesudah (v1.1.15): floor 3.0 untuk n ≤ 100K
+if n <= 100_000:
+    c_lsil = 3.0      # konsisten dengan v1.1.11, |L_PB|=608 untuk BankMarketing
+else:
+    c_lsil = max(3.0, 3.0 * log10(n) / log10(1000))  # 5.5 untuk Susenas
+```
+
+Threshold 100K adalah empirical breakpoint dari eksperimen:
+- n=41K (BankMarketing): `lsil_c=3.0` → SS-Gower 0.73 ✓
+- n=49K (Adult): `lsil_c=3.0` → konsisten
+- n=102K (Diabetes130): `lsil_c=5.0` → dataset besar, log-proportional wajar
+- n=334K (Susenas): `lsil_c=5.5` → SS-Gower 0.54 ✓
+
+### Fix: `final_ss_gower` dan `best_reward` tidak di-expose di return dict pipeline
+
+`run_generic_end2end` hanya mengembalikan `best_K`, `final_algo`, `dav`.
+Akibatnya `res.get('final_ss_gower', 0)` selalu return 0 di notebook.
+
+```python
+# Sebelum:
+return { "best_K": ..., "final_algo": ..., "dav": ... }
+
+# Sesudah:
+return {
+    "best_K":         ...,
+    "final_algo":     ...,
+    "final_ss_gower": metrics.get("final_ss_gower"),  # ← fix
+    "best_reward":    metrics.get("best_reward"),       # ← fix
+    "dav":            ...,
+}
+```
+
+### Fix: `dav=null` di `metrics_internal.json` meski DAV berjalan sukses
+
+`api.py` tidak pernah menaruh `finalB` (hasil `find_best_clustering_dav`)
+ke dalam `info` dict. `pipeline.py` membaca `info.get("phase_b_result", {})`
+untuk mengambil `dav_applied`, `lnc_anchor`, `lnc_global` — tapi key ini
+tidak pernah ada, sehingga `dav_info` selalu `{}` → `dav=null`.
+
+```python
+# Fix: tambahkan phase_b_result ke info dict di api.py
+info = {
+    ...
+    "phase_b_result": {
+        k: v for k, v in (finalB or {}).items()
+        if k not in ("labels", "all_run_history")  # skip array besar
+    },
+}
+```
+
+Setelah fix, Skenario B (DAV aktif) akan menampilkan `lnc_anchor` dan
+`lnc_global` yang benar di `metrics_internal.json`.
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `api.py` | `auto_params`: fix `lsil_c` threshold n≤100K; tambah `phase_b_result` ke `info` |
+| `pipeline.py` | return dict: tambah `final_ss_gower` dan `best_reward` |
+| `__init__.py` | version → 1.1.15 |
+| `pyproject.toml` | version → 1.1.15 |
+
 ## v1.1.14 (2026-04-09)
 
 ### Fix: `auto_params` menghasilkan konfigurasi yang lebih buruk dari manual v1.1.11
