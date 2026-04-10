@@ -1068,7 +1068,8 @@ def auto_params(
         print(f"  Signals: cat={cat_ratio:.0%}  binary={binary_ratio:.0%}  "
               f"spike={spike_ratio:.0%}  missing={prof['missing_ratio']:.0%}")
         print(f"  lsil_c={auto['lsil_c']}  |L|_phaseB={int(auto['lsil_c']*n**0.5):,}  "
-              f"lsil_c_reward={auto['lsil_c_reward']}  |L|_SA={int(auto['lsil_c_reward']*n**0.5):,}  "
+              f"lsil_c_reward={auto['lsil_c_reward']}  "
+              f"|L|_SA={int((auto['lsil_c_reward'] or auto['lsil_c'])*n**0.5):,}  "
               f"c_max={auto['c_max']}")
         print(f"  landmark_mode  = {lm_tag}")
         print(f"  lambda         = {auto['cluster_adapter_lambda']}  "
