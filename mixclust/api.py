@@ -998,13 +998,16 @@ def auto_params(
     # pb_eval=30K diperlukan agar Phase B mengevaluasi secara akurat.
     # Untuk dataset kecil (n<30K): min(n, 30K) = n → tidak ada efek.
 
-    # v1.1.16 fix: floor lsil_eval_n dinaikkan 10K → 20K.
-    # Dari 4 run BankMarketing: lsil_eval=20K diperlukan agar SA menemukan
-    # kandidat subset yang benar. lsil_eval=10K → SA menemukan subset X1 yang
-    # tidak optimal, Phase B tidak bisa memperbaiki ini.
-    # lsil_eval=20K → SA menemukan subset X2 yang lebih baik → SS-Gower 0.73.
-    # Untuk dataset kecil (n<20K): min(n, 20K) = n → tidak ada efek.
-    lsil_eval = min(n, max(20_000, int(0.03 * n)))   # SA reward eval, floor 20K
+    # v1.1.17 fix: floor lsil_eval_n berbasis n, bukan seragam.
+    # Empiris dari BankMarketing (n=41K) dan Susenas (n=334K):
+    #   n≤50K: lsil_eval=10K terlalu noisy (10K/41K=24%) → butuh floor 20K
+    #   n>50K: lsil_eval=10K sudah 3% dari n → cukup, floor tinggi justru
+    #           mengubah landscape SA dan memperburuk SS-Gower
+    # Formula: floor 20K untuk n≤50K, 3% dari n untuk n>50K
+    if n <= 50_000:
+        lsil_eval = min(n, max(20_000, int(0.03 * n)))  # floor 20K untuk dataset kecil-medium
+    else:
+        lsil_eval = min(n, max(10_000, int(0.03 * n)))  # floor 10K untuk dataset besar
 
     # ── 9b. lsil_c_reward — c khusus untuk SA reward evaluation ──
     # v1.1.16 fix: threshold berbasis n.
