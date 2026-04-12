@@ -21,7 +21,9 @@ def run_dqc(
     # ── v1.1.13: disguised categorical detection ──────────────────
     disguised_cat_action: str = "warn",   # "cast" | "warn" | "ignore"
     disguised_cat_nunique_max: int = 20,  # int/float kolom dengan nunique ≤ ini
-    disguised_cat_nunique_min: int = 2,   # dan nunique ≥ ini (bukan binary, bukan zero-var)
+    disguised_cat_nunique_min: int = 3,   # dan nunique ≥ ini — mulai 3 karena binary (nunique=2)
+                                             # sudah ditangani benar oleh Gower numerik (d identik
+                                             # dengan Gower kategorik untuk 0/1)
     explicit_cat_cols: Optional[List[str]] = None,  # kolom yang user deklarasikan kategorik
     explicit_num_cols: Optional[List[str]] = None,  # kolom yang user deklarasikan numerik (tidak di-cast)
     verbose: bool = True,
