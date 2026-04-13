@@ -489,7 +489,14 @@ def run_aufs_samba(
     final_C: Optional[int] = None
     final_labels = None
 
-    if (params.engine_mode.upper() == "C") and params.auto_k:
+    # v1.1.17 fix: auto_k=False dengan engine_mode='C' tetap jalankan Phase B
+    # tapi kunci c_range ke [n_clusters, n_clusters] sehingga K tidak berubah.
+    # Sebelumnya: auto_k=False → Phase B skip → final_C dari meta final yang
+    # mengambil K dari auto_adapter._last (bisa K yang berbeda dari n_clusters).
+    _run_phase_b = (params.engine_mode.upper() == "C") and (
+        params.auto_k or (not params.auto_k and n_clusters_eff is not None)
+    )
+    if _run_phase_b:
         tB0 = perf_counter()
         cand_subsets = archive.topk(params.rerank_topk)
         if best_cols and best_cols not in cand_subsets:
@@ -511,7 +518,13 @@ def run_aufs_samba(
 
         params_B = AUFSParams(**asdict(params))
         params_B.engine_mode = "C"
-        params_B.auto_k = True
+        if params.auto_k:
+            params_B.auto_k = True
+        else:
+            # auto_k=False: kunci Phase B ke K yang diminta
+            params_B.auto_k = False
+            params_B.c_min = n_clusters_eff
+            params_B.c_max = n_clusters_eff
 
         # DAV: aktif jika dav_anchor_cols diisi
         _dav_Va = getattr(params, 'dav_anchor_cols', None)

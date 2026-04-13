@@ -1,5 +1,86 @@
 # CHANGELOG — mixclust
 
+## v1.1.17 (2026-04-13)
+
+### Fix: `auto_k=False` dengan `engine_mode='C'` mengabaikan `n_clusters`
+
+**Root cause:** Kondisi `if (params.engine_mode == "C") and params.auto_k:` di `api.py`
+menyebabkan Phase B **sama sekali tidak dijalankan** ketika `auto_k=False`.
+Tanpa Phase B, `final_C` diambil dari `auto_adapter._last` yang menyimpan K
+dari SA reward call terakhir — bukan dari `n_clusters` yang user set.
+
+**Akibat yang terlihat:**
+- `best_K` berbeda dari `n_clusters` yang di-set (contoh: `n_clusters=2` → `best_K=4`)
+- `final_algo=null` di metrics_internal.json
+- `phaseB_s` tidak ada di timing
+- Perbandingan apple-to-apple MixClust vs baseline (K_gt) tidak bisa dilakukan
+
+**Fix:** Phase B tetap dijalankan meski `auto_k=False`, tapi `c_range`
+dikunci ke `[n_clusters, n_clusters]` sehingga K tidak bisa berubah.
+
+```python
+# Sebelum: skip Phase B jika auto_k=False
+if (params.engine_mode.upper() == "C") and params.auto_k:
+    ...
+    params_B.auto_k = True  # hardcode True — bug
+
+# Sesudah: Phase B tetap jalan, tapi c_range dikunci
+_run_phase_b = (params.engine_mode.upper() == "C") and (
+    params.auto_k or (not params.auto_k and n_clusters_eff is not None)
+)
+if _run_phase_b:
+    ...
+    if params.auto_k:
+        params_B.auto_k = True
+    else:
+        params_B.auto_k = False
+        params_B.c_min = n_clusters_eff   # kunci K
+        params_B.c_max = n_clusters_eff   # kunci K
+```
+
+**Perilaku per kasus:**
+
+| `auto_k` | `engine_mode` | Phase B | c_range |
+|---|---|---|---|
+| True | C | ✓ jalan | [c_min, c_max] auto |
+| False | C | ✓ jalan | **[n_clusters, n_clusters]** ← fix |
+| False | A | ✗ skip | — |
+| False | C + n_clusters=None | ✗ skip | — |
+
+**Use case yang kini berfungsi:**
+```python
+# Perbandingan apple-to-apple MixClust vs AUFS-Samba (keduanya K=K_gt)
+params = auto_params(df, auto_k=False, n_clusters=K_gt, random_state=42)
+result = run_generic_end2end(df, outdir='out/', params=params)
+# best_K == K_gt ✓ — dijamin
+```
+
+### Fix: `auto_params` print error `NoneType * float` untuk `lsil_c_reward=None`
+
+Print statement verbose menghitung `|L|_SA = int(lsil_c_reward * n**0.5)` —
+error jika `lsil_c_reward=None` (default untuk n ≤ 100K sejak v1.1.16).
+
+**Fix:** Gunakan `(lsil_c_reward or lsil_c)` sebagai fallback.
+
+```python
+# Sebelum: TypeError untuk None
+f"|L|_SA={int(auto['lsil_c_reward'] * n**0.5):,}"
+
+# Sesudah: fallback ke lsil_c jika None
+f"|L|_SA={int((auto['lsil_c_reward'] or auto['lsil_c']) * n**0.5):,}"
+```
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `api.py` | `auto_k=False` + `engine_mode='C'`: Phase B tetap jalan dengan `c_range=[K,K]`; fix print `lsil_c_reward=None` |
+| `__init__.py` | version → 1.1.17 |
+| `pyproject.toml` | version → 1.1.17 |
+
+
+---
+
 ## v1.1.16 (2026-04-10)
 
 ### Fix: `lsil_c_reward` threshold berbasis n — konsistensi SA vs Phase B
