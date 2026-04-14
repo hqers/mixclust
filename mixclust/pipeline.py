@@ -76,31 +76,43 @@ def run_generic_end2end(
         errors="ignore"
     ).copy()
 
-    # ── Resolusi n_clusters_hint (3 jalur, prioritas menurun) ────────────
+    # ── Resolusi n_clusters_hint (4 jalur, prioritas menurun) ────────────
+    # Jalur 0: auto_k=False + params.n_clusters diset -> pakai langsung
+    #   Kasus: user ingin fixed-K via auto_params(..., auto_k=False, n_clusters=K)
+    #   tanpa perlu pass n_clusters_hint secara terpisah ke run_generic_end2end.
     # Jalur 1: user pass eksplisit -> pakai langsung
     # Jalur 2: label_col tersedia -> K_hint = nunique(y_true)
     #   Valid HANYA untuk benchmark UCI. K_hint hanya untuk inisialisasi
     #   (labels0 + L_fixed), bukan memilih K* akhir. Phase B tetap
     #   mencari K optimal secara bebas di range [c_min, c_max].
     # Jalur 3: midpoint [c_min, c_max] -- default untuk data tanpa label
-    if n_clusters_hint is not None:
-        hint_source = "explicit"
-    elif y_true is not None:
-        k_from_label = int(y_true.nunique())
-        _p = params if params is not None else AUFSParams()
-        _c_min = getattr(_p, 'c_min', 2)
-        _c_max = getattr(_p, 'c_max', 8)
-        n_clusters_hint = max(_c_min, min(k_from_label, _c_max))
-        hint_source = f"label_col='{label_col}' (nunique={k_from_label})"
-        if n_clusters_hint != k_from_label and verbose:
-            print(f"[pipeline] K_hint dari label ({k_from_label}) di-clamp ke "
-                  f"c_range [{_c_min},{_c_max}] -> {n_clusters_hint}")
-    else:
-        _p = params if params is not None else AUFSParams()
-        _c_min = getattr(_p, 'c_min', 2)
-        _c_max = getattr(_p, 'c_max', 8)
-        n_clusters_hint = _c_min + (_c_max - _c_min) // 2
-        hint_source = f"midpoint of [{_c_min},{_c_max}]"
+    hint_source = None
+    if n_clusters_hint is None and params is not None:
+        _ak = getattr(params, 'auto_k', True)
+        _nc = getattr(params, 'n_clusters', None)
+        if not _ak and _nc is not None:
+            n_clusters_hint = int(_nc)
+            hint_source = f"params.n_clusters={_nc} (auto_k=False)"
+
+    if hint_source is None:
+        if n_clusters_hint is not None:
+            hint_source = "explicit"
+        elif y_true is not None:
+            k_from_label = int(y_true.nunique())
+            _p = params if params is not None else AUFSParams()
+            _c_min = getattr(_p, 'c_min', 2)
+            _c_max = getattr(_p, 'c_max', 8)
+            n_clusters_hint = max(_c_min, min(k_from_label, _c_max))
+            hint_source = f"label_col='{label_col}' (nunique={k_from_label})"
+            if n_clusters_hint != k_from_label and verbose:
+                print(f"[pipeline] K_hint dari label ({k_from_label}) di-clamp ke "
+                      f"c_range [{_c_min},{_c_max}] -> {n_clusters_hint}")
+        else:
+            _p = params if params is not None else AUFSParams()
+            _c_min = getattr(_p, 'c_min', 2)
+            _c_max = getattr(_p, 'c_max', 8)
+            n_clusters_hint = _c_min + (_c_max - _c_min) // 2
+            hint_source = f"midpoint of [{_c_min},{_c_max}]"
     if verbose:
         print(f"[pipeline] n_clusters_hint={n_clusters_hint} (source: {hint_source})")
 
