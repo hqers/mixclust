@@ -522,6 +522,15 @@ def run_aufs_samba(
             params_B.auto_k = True
         else:
             # auto_k=False: kunci Phase B ke K yang diminta
+            # v1.1.17 fix: clamp c_max >= n_clusters_eff agar Phase B tidak
+            # skip K_gt saat auto_params menghasilkan c_max < K_gt
+            # (contoh: Obesity K_gt=7 tapi c_max=6 dari formula n<200K).
+            # Juga clamp params.c_max asli agar SA labels0 konsisten.
+            if n_clusters_eff is not None and params.c_max < n_clusters_eff:
+                if verbose:
+                    print(f"[auto_k=False] c_max={params.c_max} < K={n_clusters_eff}"
+                          f" -> clamp c_max ke {n_clusters_eff}")
+                params.c_max = n_clusters_eff
             params_B.auto_k = False
             params_B.c_min = n_clusters_eff
             params_B.c_max = n_clusters_eff
