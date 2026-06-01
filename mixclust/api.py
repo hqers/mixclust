@@ -170,7 +170,12 @@ class AUFSParams:
     red_row_subsample: Optional[int] = None
     red_backend: str = "loky"
     red_batch_size: int = 500
-    enable_post_redundancy_check= bool = True
+    # Post-selection redundancy check (v1.1.18)
+    # Verifikasi subset final S* setelah SA selesai.
+    # Jika ada pasangan fi, fj ∈ S* dengan kMSNC*(fi,fj) > mab_redundancy_threshold,
+    # fitur dengan rata-rata redundansi lebih tinggi di-drop.
+    # Menggunakan threshold yang sama dengan mab_redundancy_threshold.
+    enable_post_redundancy_check: bool = True
 
     # Re-rank
     use_rerank: bool = False
@@ -433,6 +438,9 @@ def run_aufs_samba(
     # (SA full-neighbor tidak membawa filter redundansi),
     # drop fitur dengan rata-rata redundansi lebih tinggi terhadap subset.
     if params.enable_post_redundancy_check and best_cols and red_mat:
+        if verbose:
+            print(f"[POST-CHECK] Verifikasi redundansi subset S* "
+                  f"({len(best_cols)} fitur, threshold={params.mab_redundancy_threshold})")
         cleaned = list(best_cols)
         changed = True
         while changed:
@@ -440,7 +448,8 @@ def run_aufs_samba(
             for i in range(len(cleaned)):
                 for j in range(i + 1, len(cleaned)):
                     fi, fj = cleaned[i], cleaned[j]
-                    if red_mat.get(fi, {}).get(fj, 0.0) > params.mab_redundancy_threshold:
+                    val = red_mat.get(fi, {}).get(fj, 0.0)
+                    if val > params.mab_redundancy_threshold:
                         score_i = sum(
                             red_mat.get(fi, {}).get(f, 0.0)
                             for f in cleaned if f != fi
@@ -454,8 +463,7 @@ def run_aufs_samba(
                         if verbose:
                             print(
                                 f"[POST-CHECK] Drop '{drop}' "
-                                f"(kMSNC*({fi},{fj})="
-                                f"{red_mat.get(fi,{}).get(fj,0.0):.3f} "
+                                f"(kMSNC*({fi},{fj})={val:.3f} "
                                 f"> {params.mab_redundancy_threshold})"
                             )
                         changed = True
@@ -467,7 +475,13 @@ def run_aufs_samba(
             best_reward = reward_sa(best_cols)
             archive.add(best_cols, best_reward)
             if verbose:
-                print(f"[POST-CHECK] Subset updated: {len(best_cols)} fitur")
+                print(f"[POST-CHECK] Subset diperbarui -> {len(best_cols)} fitur: "
+                      f"{best_cols}")
+        else:
+            if verbose:
+                print(f"[POST-CHECK] PASSED — tidak ada pasangan redundan "
+                      f"(semua kMSNC* dalam S* <= {params.mab_redundancy_threshold}). "
+                      f"Subset dipertahankan: {best_cols}")
 
 
     # 7) Optional re-rank
@@ -860,7 +874,11 @@ def find_best_feature_subsets(
     # Bersihkan seluruh subset dalam archive topk sebelum diserahkan ke Phase B.
     top_k_subsets = archive.topk(num_top_subsets)
     if params.enable_post_redundancy_check and top_k_subsets and red_mat:
+        if verbose:
+            print(f"[POST-CHECK] Verifikasi redundansi {len(top_k_subsets)} subset "
+                  f"dari archive (threshold={params.mab_redundancy_threshold})")
         cleaned_subsets = []
+        n_dropped_total = 0
         for subset in top_k_subsets:
             cleaned = list(subset)
             changed = True
@@ -869,7 +887,8 @@ def find_best_feature_subsets(
                 for i in range(len(cleaned)):
                     for j in range(i + 1, len(cleaned)):
                         fi, fj = cleaned[i], cleaned[j]
-                        if red_mat.get(fi, {}).get(fj, 0.0) > params.mab_redundancy_threshold:
+                        val = red_mat.get(fi, {}).get(fj, 0.0)
+                        if val > params.mab_redundancy_threshold:
                             score_i = sum(
                                 red_mat.get(fi, {}).get(f, 0.0)
                                 for f in cleaned if f != fi
@@ -880,13 +899,21 @@ def find_best_feature_subsets(
                             ) / max(1, len(cleaned) - 1)
                             drop = fi if score_i >= score_j else fj
                             cleaned = [f for f in cleaned if f != drop]
+                            n_dropped_total += 1
                             changed = True
                             break
                     if changed:
                         break
             cleaned_subsets.append(cleaned)
         top_k_subsets = cleaned_subsets
-        
+        if verbose:
+            if n_dropped_total == 0:
+                print(f"[POST-CHECK] PASSED — tidak ada fitur redundan "
+                      f"ditemukan di seluruh subset archive "
+                      f"(semua kMSNC* <= {params.mab_redundancy_threshold})")
+            else:
+                print(f"[POST-CHECK] {n_dropped_total} fitur di-drop "
+                      f"dari subset archive")
     info = {
         "timing_s": timing, "params": asdict(params),
         "sa_stats": sa_stats, "mab_stats": mab_stats,

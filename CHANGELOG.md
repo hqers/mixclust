@@ -1,5 +1,89 @@
 # CHANGELOG — mixclust
 
+## v1.1.18 (2026-06-01)
+
+### Feature: Post-selection Redundancy Check
+
+Penambahan mekanisme verifikasi redundansi pada subset final S* setelah SA
+selesai. Sebelumnya, SA yang berjalan dalam `full-neighbor` mode (add/drop/swap)
+tidak membawa filter redundansi, sehingga subset output SA berpotensi mengandung
+pasangan fitur dengan kMSNC\* > threshold meskipun titik awal dari MAB sudah
+non-redundan.
+
+**Arsitektur redundancy control tiga lapis:**
+
+```
+MAB (kMSNC*)         SA (L-Sil)          Post-check (kMSNC*)
+      ↓                    ↓                      ↓
+Non-redundan        Kualitas klaster        Non-redundan
+di INPUT            dioptimalkan            di OUTPUT
+```
+
+**Perubahan di `AUFSParams`:**
+
+Parameter baru `enable_post_redundancy_check: bool = True` ditempatkan di
+blok `# Redundancy` bersama parameter redundansi lainnya. Menggunakan
+threshold yang sama dengan `mab_redundancy_threshold` (default 0.90).
+
+```python
+# Blok Redundancy di AUFSParams:
+red_batch_size: int = 500
+# Post-selection redundancy check (v1.1.18)
+enable_post_redundancy_check: bool = True  # ← baru
+```
+
+**Fix: `red_matrix` dan `red_threshold` sebelumnya tidak diteruskan ke `mab_explore`:**
+
+Dua pemanggilan `mab_explore` di `api.py` tidak meneruskan `red_matrix`
+sehingga filter konstruksi MAB tidak pernah aktif (selalu `None`).
+`mab_redundancy_threshold = 0.90` di `AUFSParams` tidak pernah digunakan.
+
+```python
+# Sebelum — filter konstruksi MAB tidak aktif:
+mab_out, mab_stats = mab_explore(
+    df, reward_for_mab, params.mab_T, k_resolved, rng_py,
+)
+
+# Sesudah — filter konstruksi MAB aktif:
+mab_out, mab_stats = mab_explore(
+    df, reward_for_mab, params.mab_T, k_resolved, rng_py,
+    red_matrix=red_mat,
+    red_threshold=params.mab_redundancy_threshold,
+)
+```
+
+**Post-check verbose output:**
+
+Jika `verbose=True`, post-check menampilkan notifikasi eksplisit:
+
+```
+# Jika tidak ada pasangan redundan (kasus normal):
+[POST-CHECK] Verifikasi redundansi subset S* (6 fitur, threshold=0.9)
+[POST-CHECK] PASSED — tidak ada pasangan redundan
+             (semua kMSNC* dalam S* <= 0.9).
+             Subset dipertahankan: ['WorkerShare', 'AgeHead', ...]
+
+# Jika ada pasangan redundan yang di-drop:
+[POST-CHECK] Verifikasi redundansi subset S* (7 fitur, threshold=0.9)
+[POST-CHECK] Drop 'FiturA' (kMSNC*(FiturA,FiturB)=0.934 > 0.9)
+[POST-CHECK] Subset diperbarui -> 6 fitur: ['FiturB', ...]
+```
+
+**Untuk menonaktifkan (ablation study):**
+
+```python
+params = AUFSParams(enable_post_redundancy_check=False)
+```
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `api.py` | Tambah `enable_post_redundancy_check` di `AUFSParams` blok Redundancy; fix dua pemanggilan `mab_explore` dengan `red_matrix=red_mat`; tambah post-check setelah SA di dua lokasi dengan verbose output |
+| `__init__.py` | version → 1.1.18 |
+
+---
+
 ## v1.1.17 (2026-04-13)
 
 ### Fix: `auto_k=False` dengan `engine_mode='C'` mengabaikan `n_clusters`
