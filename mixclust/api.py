@@ -170,6 +170,7 @@ class AUFSParams:
     red_row_subsample: Optional[int] = None
     red_backend: str = "loky"
     red_batch_size: int = 500
+    enable_post_redundancy_check= bool = True
 
     # Re-rank
     use_rerank: bool = False
@@ -379,6 +380,8 @@ def run_aufs_samba(
     reward_for_mab = make_mab_reward_from_matrix(red_mat)
     mab_out, mab_stats = mab_explore(
         df, reward_for_mab, params.mab_T, k_mab_resolved, rng_py,
+        red_matrix=red_mat,
+        red_threshold=params.mab_redundancy_threshold,
     )
     mab_subset = (
         max(mab_out, key=lambda x: x[1])[0]
@@ -424,6 +427,48 @@ def run_aufs_samba(
     best_cols = best_cols_sa
     if best_cols:
         archive.add(best_cols, best_reward)
+
+    # ── Post-selection redundancy check (v1.1.18) ─────────────────
+    # Verifikasi subset final S* — jika ada pasangan redundan setelah SA
+    # (SA full-neighbor tidak membawa filter redundansi),
+    # drop fitur dengan rata-rata redundansi lebih tinggi terhadap subset.
+    if params.enable_post_redundancy_check and best_cols and red_mat:
+        cleaned = list(best_cols)
+        changed = True
+        while changed:
+            changed = False
+            for i in range(len(cleaned)):
+                for j in range(i + 1, len(cleaned)):
+                    fi, fj = cleaned[i], cleaned[j]
+                    if red_mat.get(fi, {}).get(fj, 0.0) > params.mab_redundancy_threshold:
+                        score_i = sum(
+                            red_mat.get(fi, {}).get(f, 0.0)
+                            for f in cleaned if f != fi
+                        ) / max(1, len(cleaned) - 1)
+                        score_j = sum(
+                            red_mat.get(fj, {}).get(f, 0.0)
+                            for f in cleaned if f != fj
+                        ) / max(1, len(cleaned) - 1)
+                        drop = fi if score_i >= score_j else fj
+                        cleaned = [f for f in cleaned if f != drop]
+                        if verbose:
+                            print(
+                                f"[POST-CHECK] Drop '{drop}' "
+                                f"(kMSNC*({fi},{fj})="
+                                f"{red_mat.get(fi,{}).get(fj,0.0):.3f} "
+                                f"> {params.mab_redundancy_threshold})"
+                            )
+                        changed = True
+                        break
+                if changed:
+                    break
+        if cleaned != best_cols:
+            best_cols = cleaned
+            best_reward = reward_sa(best_cols)
+            archive.add(best_cols, best_reward)
+            if verbose:
+                print(f"[POST-CHECK] Subset updated: {len(best_cols)} fitur")
+
 
     # 7) Optional re-rank
     # support alias lama enable_rerank
@@ -778,6 +823,8 @@ def find_best_feature_subsets(
     reward_for_mab = make_mab_reward_from_matrix(red_mat)
     mab_out, mab_stats = mab_explore(
         df, reward_for_mab, params.mab_T, params.mab_k, rng_py,
+        red_matrix=red_mat,
+        red_threshold=params.mab_redundancy_threshold,
     )
     mab_subset = (
         max(mab_out, key=lambda x: x[1])[0]
@@ -808,7 +855,38 @@ def find_best_feature_subsets(
     )
 
     timing["total_s"] = perf_counter() - t_all0
+
+    # ── Post-selection redundancy check (v1.1.18) ─────────────────
+    # Bersihkan seluruh subset dalam archive topk sebelum diserahkan ke Phase B.
     top_k_subsets = archive.topk(num_top_subsets)
+    if params.enable_post_redundancy_check and top_k_subsets and red_mat:
+        cleaned_subsets = []
+        for subset in top_k_subsets:
+            cleaned = list(subset)
+            changed = True
+            while changed:
+                changed = False
+                for i in range(len(cleaned)):
+                    for j in range(i + 1, len(cleaned)):
+                        fi, fj = cleaned[i], cleaned[j]
+                        if red_mat.get(fi, {}).get(fj, 0.0) > params.mab_redundancy_threshold:
+                            score_i = sum(
+                                red_mat.get(fi, {}).get(f, 0.0)
+                                for f in cleaned if f != fi
+                            ) / max(1, len(cleaned) - 1)
+                            score_j = sum(
+                                red_mat.get(fj, {}).get(f, 0.0)
+                                for f in cleaned if f != fj
+                            ) / max(1, len(cleaned) - 1)
+                            drop = fi if score_i >= score_j else fj
+                            cleaned = [f for f in cleaned if f != drop]
+                            changed = True
+                            break
+                    if changed:
+                        break
+            cleaned_subsets.append(cleaned)
+        top_k_subsets = cleaned_subsets
+        
     info = {
         "timing_s": timing, "params": asdict(params),
         "sa_stats": sa_stats, "mab_stats": mab_stats,
