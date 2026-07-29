@@ -38,7 +38,9 @@ def lnc_star(
     # Kandidat dari ANN sebelum re-rank Gower:
     M_candidates: int = 300,
     # Agregasi akhir (opsi eksperimen):
-    use_weighted_mean: bool = True,         # bobot oleh ukuran klaster
+    use_weighted_mean: Optional[bool] = None,   # v1.1.20: None = ikuti default
+                                            # paket (kanonik). True = bobot ukuran
+                                            # klaster (kontribusi ~ |C_k|^2)
 ) -> float:
     """
     LNC* (Local Neighbour Consistency with distance Contrast):
@@ -76,6 +78,8 @@ def lnc_star(
     M = min(M, max(50, int(0.05 * n)))  # ≤ 5% n, tapi ≥ 50
 
     # Bobot by cluster size
+    from .lsil import _resolve_weighted as _rw
+    use_weighted_mean = _rw(use_weighted_mean)
     if use_weighted_mean:
         # hitung ukuran klaster
         _, counts = np.unique(lab_num, return_counts=True)

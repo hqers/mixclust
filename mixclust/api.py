@@ -145,6 +145,10 @@ class AUFSParams:
     lsil_topk: int = 3              # paper default r=3
     lsil_c: float = 3.0            # |L|=c*sqrt(n), Theorem 1 JDSA
     lsil_cap_frac: float = 0.2     # batas atas landmark fraction
+    # v1.1.20: bentuk agregasi L-Sil dan LNC*. False = kanonik Eq.(3),
+    # kontribusi klaster ~ |C_k|. True = berbobot Eq.(4), ~ |C_k|^2
+    # (perilaku hingga v1.1.19, dipertahankan untuk reproduksi).
+    lsil_weighted: bool = False
 
     # Reward v2.2 — percepatan build_reward & SA reward
     lsil_eval_n: int = 20_000           # [A] n untuk evaluasi per reward call
@@ -303,6 +307,11 @@ def run_aufs_samba(
                 → O(n·|L|) per trial (bukan O(n²))
       Post    : Structural Control (LNC* validation)
     """
+
+    # v1.1.20: tetapkan bentuk agregasi untuk seluruh paket sekali di sini,
+    # agar reward, controller, dan utils memakai bentuk yang sama.
+    from .metrics.lsil import set_default_weighted as _sdw
+    _sdw(getattr(params, "lsil_weighted", False))
     t_all0 = perf_counter()
     timing: Dict[str, float] = {}
     if params is None:
@@ -364,6 +373,7 @@ def run_aufs_samba(
         lsil_topk=params.lsil_topk,
         lsil_c=params.lsil_c,
         lsil_cap_frac=params.lsil_cap_frac,
+        lsil_weighted=params.lsil_weighted,
         random_state=params.random_state,
         dynamic_k=False,
         guard_every=params.guard_every_calib,
@@ -827,6 +837,7 @@ def find_best_feature_subsets(
         lsil_topk=params.lsil_topk,
         lsil_c=params.lsil_c,
         lsil_cap_frac=params.lsil_cap_frac,
+        lsil_weighted=params.lsil_weighted,
         random_state=params.random_state,
         lsil_eval_n=params.lsil_eval_n,
         lsil_c_reward=params.lsil_c_reward,
@@ -936,6 +947,11 @@ def _profile_data(df: pd.DataFrame) -> dict:
     O(n*p) — runs once before any clustering.
     All signals derivable without labels or domain knowledge.
     """
+
+    # v1.1.20: tetapkan bentuk agregasi untuk seluruh paket sekali di sini,
+    # agar reward, controller, dan utils memakai bentuk yang sama.
+    from .metrics.lsil import set_default_weighted as _sdw
+    _sdw(getattr(params, "lsil_weighted", False))
     n, p = df.shape
     cat_cols    = df.select_dtypes(include=['object','category','bool']).columns
     binary_cols = [c for c in df.columns if df[c].nunique() == 2]

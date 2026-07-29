@@ -12,6 +12,24 @@ def adaptive_landmark_count(
     per_cluster_min: int = 3, cap_frac: float = 0.2,
 ) -> int:
     """
+NOTE on the aggregation form (v1.1.20)
+--------------------------------------
+AGGREGATION FORM. `weighted=False` (the default from v1.1.20) is the canonical
+mean over instances, Eq. (3) of the JDSA paper:
+
+    S = (1/n) sum_i s_i = sum_k |C_k| * sbar_k / sum_k |C_k|
+
+A cluster already contributes in proportion to |C_k| because it has that many
+members, so the canonical mean IS the size-proportional one.
+
+`weighted=True` gives each INSTANCE a weight equal to its cluster size, so the
+cluster contribution becomes proportional to |C_k|**2 -- the size enters twice.
+Up to v1.1.19 this was the default. It is retained for reproducing earlier
+results and for the companion column requested by JDSA Reviewer 3.
+
+The exact reference metric (full_silhouette_gower) is canonical, and Lemma 1,
+Lemma 2, Lemma 5 and Theorem 2 are all proved for the canonical form.
+
     |L| = max(K*per_cluster_min, min(c*sqrt(n), cap_frac*n, n))
     Theorem 1 (JDSA paper): O(c*p*n^{3/2}) total complexity.
     """
@@ -36,7 +54,7 @@ def compute_lsil_from_D(
     *,
     agg_mode: str = "topk",
     topk: int = 3,
-    weighted: bool = True,
+    weighted: Optional[bool] = None,
 ) -> tuple[float, np.ndarray]:
     """
     Hitung L-Sil dari distance matrix D (n x |L|).
@@ -49,6 +67,7 @@ def compute_lsil_from_D(
     lm_masks = {k: np.where(landmark_labels == k)[0] for k in unique_labels}
 
     size_map = None
+    weighted = _resolve_weighted(weighted)
     if weighted:
         _, counts = np.unique(labels, return_counts=True)
         size_map = dict(zip(np.unique(labels), counts.astype(float)))
@@ -83,6 +102,28 @@ def compute_lsil_from_D(
     return score, per_sample
 
 
+# ── Default agregasi tingkat modul (v1.1.20) ─────────────────────────────
+# Ditetapkan sekali oleh pipeline lewat AUFSParams.lsil_weighted, sehingga
+# SELURUH titik pemanggilan (reward, controller, utils) memakai bentuk yang
+# sama. Tanpa ini, menyetel lsil_weighted=True hanya akan mengubah jalur
+# reward dan menghasilkan campuran dua bentuk agregasi dalam satu run.
+_DEFAULT_WEIGHTED: bool = False        # False = kanonik Eq.(3)
+
+
+def set_default_weighted(flag: bool) -> None:
+    """Set bentuk agregasi untuk seluruh paket. False = kanonik Eq.(3)."""
+    global _DEFAULT_WEIGHTED
+    _DEFAULT_WEIGHTED = bool(flag)
+
+
+def get_default_weighted() -> bool:
+    return _DEFAULT_WEIGHTED
+
+
+def _resolve_weighted(flag):
+    return _DEFAULT_WEIGHTED if flag is None else bool(flag)
+
+
 def lsil_using_landmarks(
     labels: Sequence,
     landmark_idx: np.ndarray,
@@ -96,7 +137,7 @@ def lsil_using_landmarks(
     inv_rng: Optional[np.ndarray] = None,
     agg_mode: str = "topk",
     topk: int = 3,
-    weighted: bool = True,
+    weighted: Optional[bool] = None,
     return_D: bool = False,
 ):
     """
@@ -138,7 +179,7 @@ def lsil_using_prototypes_gower(
     select_landmarks_fn=None,                   # diabaikan
     agg_mode: str = "topk",
     topk: int = 3,
-    weighted: bool = True,
+    weighted: Optional[bool] = None,
 ) -> float:
     """Backward-compat wrapper → lsil_using_landmarks(). Proto params diabaikan."""
     return lsil_using_landmarks(
@@ -161,7 +202,7 @@ def lsil_fast_mean_only(
     feature_mask_num: Optional[np.ndarray] = None,
     feature_mask_cat: Optional[np.ndarray] = None,
     inv_rng: Optional[np.ndarray] = None,
-    weighted: bool = True,
+    weighted: Optional[bool] = None,
 ) -> float:
     """Fast variant (agg_mode=mean) untuk screening K."""
     return lsil_using_landmarks(

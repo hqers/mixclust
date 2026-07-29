@@ -1022,10 +1022,18 @@ def find_best_clustering_from_subsets(
     if verbose and best_overall_result:
         print("\n[PHASE B DONE]")
 
-    # ── Structural Control ──
+    # ── Structural Control (dengan retry loop ke elite archive) ──
+    # v1.2.0: LNC* threshold gate. Jika kandidat awal gagal ambang, coba
+    # kandidat lain dari all_run_history (elite archive Phase B) yang
+    # berskor J tertinggi berikutnya, hingga lolos atau mencapai
+    # sc_max_retries. Ini adalah implementasi dari desain feedback loop
+    # yang sebelumnya hanya berupa diagram (structural control diagnostik
+    # murni). Jika kandidat awal sudah lolos (kasus pada seluruh hasil
+    # yang telah dilaporkan sejauh ini), perilaku identik dengan versi lama.
     sc_result = None
     n_samples = len(df_full)
     uses_landmark = (n_samples > getattr(params, 'ss_max_n', 2000))
+    max_retries = getattr(params, 'sc_max_retries', 3)
 
     if (
         run_structural_control
@@ -1048,6 +1056,72 @@ def find_best_clustering_from_subsets(
                 random_state=getattr(params, 'random_state', 42),
                 verbose=verbose,
             )
+
+            if not sc_result.passed:
+                # Elite archive: kandidat lain yang sudah dievaluasi di
+                # Phase B, diurutkan dari skor J (score_adj) tertinggi ke
+                # terendah, tidak termasuk kandidat awal yang baru gagal.
+                initial_key = tuple(sorted(best_subset))
+                ranked_candidates = sorted(
+                    (r for r in all_run_history.values()
+                     if tuple(sorted(r.get("subset", []))) != initial_key),
+                    key=lambda r: r.get("score_adj", -np.inf),
+                    reverse=True,
+                )
+
+                tried = {initial_key}
+                n_attempts = 0
+                for candidate in ranked_candidates:
+                    if n_attempts >= max_retries:
+                        break
+
+                    cand_subset = candidate.get("subset", [])
+                    cand_labels = candidate.get("labels")
+                    cand_key = tuple(sorted(cand_subset)) if cand_subset else None
+
+                    if (
+                        not cand_subset
+                        or cand_labels is None
+                        or len(np.unique(np.asarray(cand_labels))) < 2
+                        or cand_key in tried
+                    ):
+                        continue
+
+                    tried.add(cand_key)
+                    n_attempts += 1
+
+                    df_cand = df_full[cand_subset]
+                    cat_cols_cand = [c for c in cand_subset if c in cat_cols_full]
+                    retry_sc = structural_control_lnc(
+                        X_df=df_cand,
+                        labels=np.asarray(cand_labels),
+                        cat_cols=cat_cols_cand,
+                        lnc_threshold=lnc_threshold,
+                        lnc_k=lnc_k,
+                        random_state=getattr(params, 'random_state', 42),
+                        verbose=verbose,
+                    )
+
+                    if verbose:
+                        print(
+                            f"  [STRUCTURAL CONTROL] Retry #{n_attempts} dari "
+                            f"elite archive (J={candidate.get('score_adj', float('nan')):.4f}) "
+                            f"-> LNC*={retry_sc.lnc_score:.4f}"
+                        )
+
+                    sc_result = retry_sc
+                    if retry_sc.passed:
+                        best_overall_result = candidate
+                        break
+
+                if not sc_result.passed:
+                    sc_result.action = "rejected_all"
+                    if verbose:
+                        print(
+                            f"  [STRUCTURAL CONTROL] Seluruh {n_attempts} kandidat "
+                            f"retry gagal ambang LNC*={lnc_threshold:.2f}. Kandidat "
+                            f"awal tetap dipakai dengan flag 'rejected_all'."
+                        )
 
     if best_overall_result:
         best_overall_result["all_run_history"] = all_run_history

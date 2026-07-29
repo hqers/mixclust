@@ -1,5 +1,125 @@
 # CHANGELOG — mixclust
 
+## v1.1.20 (2026-07-30)
+
+### Change: bentuk agregasi L-Sil dan LNC* menjadi kanonik
+
+Menanggapi butir B3 penelaahan disertasi (Dr. Dimitri Mahayana, 28 Juli 2026)
+mengenai bobot ganda kuadratik pada varian L-Sil.
+
+**Temuan.** Bentuk kanonik Silhouette adalah rata-rata sederhana atas instance:
+
+    S = (1/n) sum_i s_i = sum_k |C_k| * sbar_k / sum_k |C_k|
+
+Karena setiap instance menyumbang sekali, sebuah klaster **sudah** menyumbang
+sebanding dengan |C_k|. Hingga v1.1.19, `weighted=True` memberi setiap instance
+bobot tambahan sebesar ukuran klasternya, sehingga kontribusi klaster menjadi
+sebanding **|C_k|^2** — ukuran klaster masuk dua kali. Pada dataset dengan
+klaster tidak seimbang, klaster minoritas praktis tidak berpengaruh: pada
+Obesity (K=7) rasio pengaruh klaster terbesar terhadap terkecil naik dari
+sekitar 29x menjadi 843x.
+
+Tiga hal menguatkan perubahan ini. Metrik acuan `full_silhouette_gower`
+bersifat kanonik, sehingga perbandingan sebelumnya tidak sepadan. Seluruh
+pembuktian teoretis (Lemma 1, 2, 5, Teorema 2) dilakukan untuk bentuk kanonik.
+Dan justifikasi yang tertulis di naskah, yaitu bahwa Silhouette klasik secara
+implisit berbobot ukuran klaster, sesungguhnya membenarkan bentuk kanonik.
+
+**Bukti empiris (11 dataset UCI, 5 seed, landmark identik, SS_G eksak):**
+
+| Besaran | Eq.(4) berbobot | Eq.(3) kanonik |
+|---|---|---|
+| mean MAE | 0.1580 | **0.1517** |
+| calibrated MAE | 0.0120 | **0.0116** |
+| LODO MAE | 0.0145 | **0.0138** |
+| Spearman rho | **0.9182** | 0.8818 |
+| R^2 | **0.9775** | 0.9742 |
+| sd antar seed | 0.0031 | 0.0031 |
+
+Selisih kedua bentuk kecil: rata-rata 0.0065, terbesar 0.0280 (Automobile),
+sekitar 4% dari MAE. Bentuk kanonik lebih baik pada seluruh metrik galat,
+termasuk galat held-out yang menjadi angka utama. Keunggulan rho pada bentuk
+berbobot bertumpu pada satu pertukaran peringkat (Adult <-> Automobile) dengan
+selang kepercayaan yang bertumpang tindih hampir sepenuhnya.
+
+Tidak ada satu pun dataset yang berpindah sisi terhadap ambang Structural
+Control 0.5: sembilan tetap di atas, dua (Student Performance, Flags) tetap di
+bawah. Margin terdekat 0.138, sementara penurunan LNC* terbesar hanya 0.062.
+
+**Perubahan API:**
+
+```python
+# baru di AUFSParams
+lsil_weighted: bool = False   # False = kanonik Eq.(3); True = berbobot Eq.(4)
+```
+
+Bentuk agregasi disimpan sebagai default tingkat modul dan ditetapkan sekali
+oleh `run_aufs_samba` / `find_best_feature_subsets` dari `params.lsil_weighted`:
+
+```python
+from mixclust.metrics.lsil import set_default_weighted, get_default_weighted
+```
+
+Parameter `weighted` pada `mixclust.metrics.lsil` dan `use_weighted_mean` pada
+`mixclust.metrics.lnc_star` kini bersentinel `None`, yang berarti "ikuti default
+paket"; nilai eksplisit `True`/`False` tetap menang. Ini disengaja: `controller.py`
+dan modul `utils/` memanggil kedua metrik tanpa menerima `params`, sehingga tanpa
+default tingkat modul, menyetel `lsil_weighted=True` hanya akan mengubah jalur
+reward dan menghasilkan **campuran dua bentuk agregasi dalam satu run**.
+
+**Kompatibilitas mundur.** Setel `lsil_weighted=True` untuk memperoleh
+perilaku v1.1.19 dan sebelumnya. Angka yang telah dilaporkan pada disertasi
+(v1.1.17) dan paper JDSA dihasilkan dengan bentuk berbobot; keduanya perlu
+dijalankan ulang, dan bentuk berbobot dilaporkan sebagai kolom pendamping.
+
+**Cakupan.** Rilis ini **hanya** mengubah bentuk agregasi. Penyelarasan
+seleksi landmark dengan paket `lsil` v1.0.0 (`pool_frac_cap`, konstruksi pool
+boundary, metrik farthest-first) sengaja ditunda ke rilis berikutnya agar
+dampak butir B3 dapat diatribusikan ke satu faktor.
+
+## v1.1.19 (2026-07-22)
+
+### Feature: Structural Control retry loop ke elite archive
+
+Sebelumnya, *Structural Control* berbasis LNC* di `controller.py`
+(`find_best_clustering_from_subsets`) bersifat diagnostik murni: jika
+kandidat terbaik gagal ambang LNC* (`passed=False`), sistem hanya
+mencatat `action="warning"` tanpa mengambil tindakan lanjutan.
+Kandidat yang gagal tetap diterima sebagai keluaran akhir.
+
+Rilis ini mengimplementasikan mekanisme retry yang sebelumnya hanya
+berupa desain diagram (`module_iii_with_feedback_loop`, belum ada di
+kode): jika kandidat awal gagal ambang LNC*, sistem sekarang mencoba
+kandidat lain dari `all_run_history` (elite archive yang sudah
+dikumpulkan sepanjang Phase B), diurutkan dari skor J (`score_adj`)
+tertinggi ke terendah, hingga ditemukan kandidat yang lolos atau
+batas percobaan tercapai.
+
+**Parameter baru di `find_best_clustering_from_subsets`:**
+
+```python
+# Jumlah maksimum kandidat elite archive yang dicoba
+# setelah kandidat awal gagal ambang LNC* (default: 3)
+sc_max_retries: int = 3  # dapat diatur via params.sc_max_retries
+```
+
+**Perubahan pada `StructuralControlResult.action`:**
+
+Jika seluruh kandidat retry tetap gagal ambang, `action` diset
+menjadi `"rejected_all"` (sebelumnya diam-diam tetap `"warning"`),
+agar status ini eksplisit di metadata hasil dan dapat dilacak dalam
+audit reproduksibilitas.
+
+**Kompatibilitas mundur:** jika kandidat awal sudah lolos ambang LNC*
+(satu-satunya kondisi yang teramati pada seluruh hasil yang telah
+divalidasi hingga rilis ini), perilaku identik dengan v1.1.18 —
+tidak ada perubahan pada angka yang telah dilaporkan.
+
+**Status:** patch minor. Belum ditandai sebagai rilis stabil v1.2.0;
+jalur retry ini belum diuji dengan skenario LNC* gagal ambang secara
+sintetis (lihat *Saran* pengembangan lanjutan). Penandaan v1.2.0 akan
+menyusul setelah seluruh perbaikan lain untuk disertasi selesai.
+
 ## v1.1.18 (2026-06-01)
 
 ### Feature: Post-selection Redundancy Check

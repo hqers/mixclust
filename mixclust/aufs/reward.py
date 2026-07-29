@@ -204,6 +204,7 @@ def make_sa_reward(
     lsil_cap_frac: float = 0.2,
     lsil_agg_mode="mean",
     lsil_topk=5,
+    lsil_weighted=False,     # v1.1.20: kanonik Eq.(3); True = berbobot Eq.(4)
     random_state=42,
     dynamic_k: bool = False,
     guard_every: int = 50,
@@ -295,7 +296,7 @@ def make_sa_reward(
             score = lsil_using_landmarks(
                 labels_sub, L_fixed, X_num, X_cat, num_min, num_max,
                 feature_mask_num=mn, feature_mask_cat=mc, inv_rng=inv,
-                agg_mode=lsil_agg_mode, topk=lsil_topk,
+                agg_mode=lsil_agg_mode, topk=lsil_topk, weighted=lsil_weighted,
             )
             if use_redundancy_penalty and redundancy_matrix is not None:
                 score = (1 - alpha_penalty) * score + \
@@ -378,7 +379,7 @@ def make_sa_reward(
                     X_num_e, X_cat_e, num_min_e, num_max_e,
                     feature_mask_num=mask_num, feature_mask_cat=mask_cat,
                     inv_rng=inv_rng_e,
-                    agg_mode=lsil_agg_mode, topk=lsil_topk,
+                    agg_mode=lsil_agg_mode, topk=lsil_topk, weighted=lsil_weighted,
                 )
             except Exception as e:
                 print(f"❌ lsil_fixed: {e}")
@@ -523,7 +524,7 @@ def make_sa_reward(
                     X_num_e, X_cat_e, num_min_e, num_max_e,
                     feature_mask_num=mask_num, feature_mask_cat=mask_cat,
                     inv_rng=inv_rng_e,
-                    agg_mode=lsil_agg_mode, topk=lsil_topk,
+                    agg_mode=lsil_agg_mode, topk=lsil_topk, weighted=lsil_weighted,
                 )
             except Exception as e:
                 if call_count <= 3:
