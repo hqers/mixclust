@@ -53,8 +53,9 @@ bawah. Margin terdekat 0.138, sementara penurunan LNC* terbesar hanya 0.062.
 lsil_weighted: bool = False   # False = kanonik Eq.(3); True = berbobot Eq.(4)
 ```
 
-Bentuk agregasi disimpan sebagai default tingkat modul dan ditetapkan sekali
-oleh `run_aufs_samba` / `find_best_feature_subsets` dari `params.lsil_weighted`:
+Bentuk agregasi disimpan sebagai default tingkat modul dan ditetapkan oleh
+`AUFSParams.__post_init__`, sehingga berlaku sejak objek params dibentuk
+(termasuk lewat `auto_params`):
 
 ```python
 from mixclust.metrics.lsil import set_default_weighted, get_default_weighted

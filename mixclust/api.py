@@ -150,6 +150,7 @@ class AUFSParams:
     # (perilaku hingga v1.1.19, dipertahankan untuk reproduksi).
     lsil_weighted: bool = False
 
+
     # Reward v2.2 — percepatan build_reward & SA reward
     lsil_eval_n: int = 20_000           # [A] n untuk evaluasi per reward call
     lsil_c_reward: Optional[float] = None  # [A] c untuk landmark eval
@@ -231,6 +232,14 @@ class AUFSParams:
     dav_lm_c: float = 3.0                    # v1.1.10: landmark count = lm_c * sqrt(n_sub)
     dav_anchor_subsample_n: int = 10_000     # v1.1.10: subsample size for AnchorContext
     dav_lm_frac: float = 0.20               # deprecated — kept for backward compat, not used
+    def __post_init__(self):
+        # v1.1.20: tetapkan bentuk agregasi untuk SELURUH paket di satu tempat.
+        # controller.py dan modul utils/ memanggil L-Sil dan LNC* tanpa menerima
+        # params, sehingga tanpa default tingkat modul, lsil_weighted=True hanya
+        # akan mengubah jalur reward dan menghasilkan campuran dua bentuk
+        # agregasi dalam satu run.
+        from .metrics.lsil import set_default_weighted as _sdw
+        _sdw(self.lsil_weighted)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -307,11 +316,6 @@ def run_aufs_samba(
                 → O(n·|L|) per trial (bukan O(n²))
       Post    : Structural Control (LNC* validation)
     """
-
-    # v1.1.20: tetapkan bentuk agregasi untuk seluruh paket sekali di sini,
-    # agar reward, controller, dan utils memakai bentuk yang sama.
-    from .metrics.lsil import set_default_weighted as _sdw
-    _sdw(getattr(params, "lsil_weighted", False))
     t_all0 = perf_counter()
     timing: Dict[str, float] = {}
     if params is None:
@@ -947,11 +951,6 @@ def _profile_data(df: pd.DataFrame) -> dict:
     O(n*p) — runs once before any clustering.
     All signals derivable without labels or domain knowledge.
     """
-
-    # v1.1.20: tetapkan bentuk agregasi untuk seluruh paket sekali di sini,
-    # agar reward, controller, dan utils memakai bentuk yang sama.
-    from .metrics.lsil import set_default_weighted as _sdw
-    _sdw(getattr(params, "lsil_weighted", False))
     n, p = df.shape
     cat_cols    = df.select_dtypes(include=['object','category','bool']).columns
     binary_cols = [c for c in df.columns if df[c].nunique() == 2]
